@@ -92,7 +92,7 @@ vps-psiphon region JP       change exit country
 vps-psiphon speed           50 MB single stream + 4 streams aggregate
 vps-psiphon logs [n]        Psiphon client log
 vps-psiphon watchdog [n]    watchdog journal
-vps-psiphon uninstall       remove
+vps-psiphon uninstall       remove everything, including this CLI
 ```
 
 ## What gets installed
@@ -106,6 +106,8 @@ vps-psiphon uninstall       remove
 | `vps-psiphon.service` | container under systemd, `Restart=always` |
 | `vps-psiphon-watchdog.timer` | check every 10 minutes |
 | `/opt/vps-psiphon/config` | Psiphon config (container volume) |
+| `/var/log/vps-psiphon-watchdog.log` | watchdog journal |
+| `/var/lib/vps-psiphon-watchdog.state` | watchdog counters |
 
 ## The watchdog
 
@@ -214,8 +216,12 @@ aggregate differed fourfold between two German exits.
 ## Uninstall
 
 ```bash
-vps-psiphon uninstall && rm -f /usr/local/sbin/vps-psiphon
+vps-psiphon uninstall
 ```
+
+Removes the units, the container, the image, the config directory, the watchdog log
+and state — and finally unlinks itself, so nothing is left to clean up by hand. It
+then checks the disk and, if anything survived, names it and exits non-zero.
 
 ## Links
 

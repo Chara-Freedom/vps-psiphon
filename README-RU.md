@@ -93,7 +93,7 @@ vps-psiphon region JP       сменить страну выхода
 vps-psiphon speed           50 МБ одним потоком + 4 потока агрегатом
 vps-psiphon logs [n]        лог клиента Psiphon
 vps-psiphon watchdog [n]    журнал вотчдога
-vps-psiphon uninstall       удалить
+vps-psiphon uninstall       удалить всё, включая сам CLI
 ```
 
 ## Что ставится
@@ -107,6 +107,8 @@ vps-psiphon uninstall       удалить
 | `vps-psiphon.service` | контейнер под супервизией systemd, `Restart=always` |
 | `vps-psiphon-watchdog.timer` | проверка раз в 10 минут |
 | `/opt/vps-psiphon/config` | конфиг Psiphon (том контейнера) |
+| `/var/log/vps-psiphon-watchdog.log` | журнал вотчдога |
+| `/var/lib/vps-psiphon-watchdog.state` | счётчики вотчдога |
 
 ## Вотчдог
 
@@ -213,8 +215,12 @@ upstream: 0}` при `ActiveAuthorizationIDs: []`. Гигабайт одним �
 ## Удаление
 
 ```bash
-vps-psiphon uninstall && rm -f /usr/local/sbin/vps-psiphon
+vps-psiphon uninstall
 ```
+
+Удаляет юниты, контейнер, образ, каталог конфига, журнал и состояние вотчдога — и в
+конце снимает сам себя, так что подчищать руками нечего. После этого сверяется с
+диском и, если что-то уцелело, называет это и возвращает ненулевой код.
 
 ## Ссылки
 

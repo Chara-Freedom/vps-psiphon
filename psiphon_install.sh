@@ -14,6 +14,12 @@
 #   /usr/local/sbin/vps-psiphon           management CLI
 #   /etc/systemd/system/vps-psiphon.service
 #   /etc/systemd/system/vps-psiphon-watchdog.service + .timer
+#   /opt/vps-psiphon/config               psiphon's own config and server list
+#   /var/log/vps-psiphon-watchdog.log     watchdog journal
+#   /var/lib/vps-psiphon-watchdog.state   watchdog counters
+#
+# `vps-psiphon uninstall` removes every one of those, plus the container and the
+# image, and finally unlinks itself: a clean uninstall leaves nothing behind.
 set -euo pipefail
 
 IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
@@ -275,7 +281,14 @@ touch /var/log/vps-psiphon-watchdog.log
 cat > /usr/local/sbin/vps-psiphon <<'CLI'
 #!/usr/bin/env bash
 set -uo pipefail
-. /etc/default/vps-psiphon
+# Sourced defensively. Once the env file is gone — a half-finished uninstall, a
+# hand-deleted file — `set -u` would abort on the first unset variable and leave
+# the CLI unable to clean up after itself. The defaults keep every branch usable.
+[ -r /etc/default/vps-psiphon ] && . /etc/default/vps-psiphon
+IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
+NAME="${NAME:-vps-psiphon}"
+SOCKS_PORT="${SOCKS_PORT:-1080}"
+CONF_DIR="${CONF_DIR:-/opt/vps-psiphon/config}"
 S=(--socks5-hostname "127.0.0.1:${SOCKS_PORT}")
 
 status() {
@@ -324,16 +337,40 @@ case "${1:-status}" in
   logs)     docker logs --tail "${2:-50}" "$NAME" ;;
   watchdog) tail -n "${2:-30}" /var/log/vps-psiphon-watchdog.log ;;
   uninstall)
-    systemctl disable --now vps-psiphon-watchdog.timer vps-psiphon.service 2>/dev/null
-    docker rm -f "$NAME" 2>/dev/null
+    systemctl disable --now vps-psiphon-watchdog.timer vps-psiphon-watchdog.service \
+                            vps-psiphon.service >/dev/null 2>&1
+    docker rm -f "$NAME" >/dev/null 2>&1
     rm -f /etc/systemd/system/vps-psiphon.service \
           /etc/systemd/system/vps-psiphon-watchdog.service \
           /etc/systemd/system/vps-psiphon-watchdog.timer
-    rm -f /usr/local/sbin/vps-psiphon-run /usr/local/sbin/vps-psiphon-watchdog \
-          /etc/default/vps-psiphon /var/lib/vps-psiphon-watchdog.state
-    rm -rf /opt/vps-psiphon
     systemctl daemon-reload
-    echo "removed (this CLI itself: rm -f /usr/local/sbin/vps-psiphon)" ;;
+    systemctl reset-failed vps-psiphon.service vps-psiphon-watchdog.service >/dev/null 2>&1
+    # The installer pulled this image and a reinstall pulls it again, so it is ours
+    # to drop. Docker refuses if anything else still references it — that is fine.
+    docker image rm "$IMAGE" >/dev/null 2>&1
+    rm -f /usr/local/sbin/vps-psiphon-run /usr/local/sbin/vps-psiphon-watchdog \
+          /etc/default/vps-psiphon /var/lib/vps-psiphon-watchdog.state \
+          /var/log/vps-psiphon-watchdog.log /tmp/vpspsi.speed
+    rm -rf /opt/vps-psiphon
+    # Unlinking the running script is safe: bash holds an open descriptor on the
+    # inode, so the rest of this branch keeps executing after the name is gone.
+    rm -f /usr/local/sbin/vps-psiphon
+    # Claiming "removed" is worth nothing unmeasured — look at the disk and say so.
+    left=""
+    for p in /usr/local/sbin/vps-psiphon /usr/local/sbin/vps-psiphon-run \
+             /usr/local/sbin/vps-psiphon-watchdog /etc/default/vps-psiphon \
+             /etc/systemd/system/vps-psiphon.service \
+             /etc/systemd/system/vps-psiphon-watchdog.service \
+             /etc/systemd/system/vps-psiphon-watchdog.timer \
+             /var/lib/vps-psiphon-watchdog.state \
+             /var/log/vps-psiphon-watchdog.log /opt/vps-psiphon ; do
+      [ -e "$p" ] && left="$left $p"
+    done
+    docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$NAME" && left="$left container:$NAME"
+    docker image inspect "$IMAGE" >/dev/null 2>&1 \
+      && echo "note: image $IMAGE kept, something else on this host references it"
+    [ -n "$left" ] && { echo "removed, but these remain:$left" >&2; exit 1; }
+    echo "removed: units, container, image, config, state, log — and this CLI itself" ;;
   *) echo "usage: vps-psiphon {status|rotate|region <CC>|speed|logs [n]|watchdog [n]|uninstall}" ;;
 esac
 CLI
