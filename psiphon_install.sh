@@ -400,6 +400,6 @@ echo
 say "xray outbound:"
 cat <<OUT
     { "tag": "psiphon-out", "protocol": "socks",
-      "settings": { "servers": [ { "address": "127.0.0.1", "port": $SOCKS_PORT } ] } }
+      "settings": { "address": "127.0.0.1", "port": $SOCKS_PORT } }
 OUT
 say "manage with:  vps-psiphon {status|rotate|region <CC>|speed|logs|uninstall}"

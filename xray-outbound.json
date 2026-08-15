@@ -10,11 +10,7 @@
   "tag": "psiphon-out",
   "protocol": "socks",
   "settings": {
-    "servers": [
-      {
-        "address": "127.0.0.1",
-        "port": 1080
-      }
-    ]
+    "address": "127.0.0.1",
+    "port": 1080
   }
 }

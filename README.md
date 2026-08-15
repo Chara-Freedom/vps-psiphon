@@ -57,13 +57,18 @@ country.
   "tag": "psiphon-out",
   "protocol": "socks",
   "settings": {
-    "servers": [{ "address": "127.0.0.1", "port": 1080 }]
+    "address": "127.0.0.1",
+    "port": 1080
   }
 }
 ```
 
 Routing rules are yours to decide. One constraint: **do not send UDP here** — the
 Psiphon local proxy does not support it (see Measurements).
+
+Older guides wrap this in a `"servers": [ … ]` array. Xray still parses that form —
+`infra/conf/socks.go` keeps both — but it is V2Ray legacy, no longer in the Xray
+documentation, and panels that validate against the current schema will flag it.
 
 ## Managing it
 
