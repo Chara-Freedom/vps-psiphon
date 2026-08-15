@@ -70,6 +70,19 @@ Older guides wrap this in a `"servers": [ … ]` array. Xray still parses that f
 `infra/conf/socks.go` keeps both — but it is V2Ray legacy, no longer in the Xray
 documentation, and panels that validate against the current schema will flag it.
 
+### Expect to keep a second outbound
+
+Psiphon exits are shared circumvention infrastructure, which is exactly the category
+aggressive bot protection refuses. Measured: Reddit answers a Psiphon exit with
+"you've been blocked by network security" while serving the same client normally
+through a Cloudflare WARP exit.
+
+So route per domain rather than sending everything one way. In practice the two
+egresses fail on opposite sides — Google distrusts WARP ranges, Cloudflare-fronted
+sites distrust shared circumvention exits — which makes them complements rather than
+alternatives. That reasoning is inference; the Reddit and Google results behind it are
+measured.
+
 ## Managing it
 
 ```
