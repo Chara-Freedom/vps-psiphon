@@ -110,25 +110,35 @@ infrastructure — reconnecting changes both the address and the ASN.
 
 ### Why the country check is the one that matters
 
-Cloudflare announces its anycast space from the client's own region, so Google
-geolocates a WARP exit back to wherever the user actually is. Measured from a Finnish
-VPS — YouTube publishes Google's verdict in its page source as `"GL":"XX"`, which
-costs one request and no credentials:
+Google keeps its own opinion about where an address is, and that opinion can disagree
+with everyone else's. YouTube publishes it in its page source as `"GL":"XX"`, which
+costs one request and no credentials. Measured from a Finnish VPS, alongside two
+independent geolocation services and wikidot.com — which blocks Russia outright and
+therefore answers honestly:
 
-| Exit | Google's verdict |
-|---|---|
-| Psiphon, region DE | `DE` |
-| Cloudflare WARP | `RU` |
-| The VPS's own address | `FI` |
+| Exit | ip-api | ipinfo | Google | wikidot.com |
+|---|---|---|---|---|
+| Psiphon, region DE | DE | DE | `DE` | 200 |
+| Cloudflare WARP | FI | FI | **`RU`** | 200 |
+| The VPS's own address | FI | FI | `FI` | 200 |
+| A Russian VPS, as a control | RU | — | `RU` | **403, "Russia not available"** |
 
-Region-gated services then refuse, saying they are "not available in your country" —
-accurate from their side, thoroughly confusing from yours, and unfixable by changing
-WARP endpoints. Psiphon reports honestly: asking for JP, NL or DE yields exactly
-`JP`, `NL`, `DE`.
+Only Google calls the WARP exit Russian. Independent geolocation says Finland, and
+wikidot serves that exit normally while refusing a genuinely Russian address — so
+this is not WARP leaking anyone's location. Google classifies those ranges that way
+for its own reasons, and changing WARP endpoints does not help, because the
+classification follows the range rather than the endpoint.
 
-**A correct country is necessary, not sufficient.** An exit can sit in the right
-country and still be refused on the address's own reputation, and no unauthenticated
-probe sees that. `HEALTH_CMD` is where you put a check that does.
+The consequence is therefore narrow and specific: **services gated on Google's view
+refuse a WARP exit, while services with honest IP geolocation are unaffected.**
+Psiphon is consistent across both — asking for JP, NL or DE yields exactly `JP`,
+`NL`, `DE` from Google and from the geolocation services alike.
+
+**A correct country is necessary, not sufficient**, and this probe has a second limit
+worth knowing: `GL` is what Google thinks of the *address*. A signed-in user also
+carries account-level signals, so a logged-in session can behave more restrictively
+than this anonymous check suggests. `HEALTH_CMD` is where you put a check for what
+this one cannot see.
 
 ### Optional settings
 
