@@ -1,54 +1,56 @@
+[РУССКОЕ ЧИТАЙМЕНЯ](README-RU.md)
+
 # vps-psiphon
 
-Psiphon как выходная точка для ноды xray/remnawave.
+Psiphon as an egress point for an xray/remnawave node.
 
-Скрипт поднимает клиент Psiphon в контейнере, привязывает его SOCKS5 к loopback и
-отдаёт xray под супервизией systemd. Отдельный вотчдог следит не только за тем,
-жив ли тоннель, но и за тем, не перестал ли выходной адрес быть пригодным, — и
-переподключается на другой, когда это случается.
+The script runs the Psiphon client in a container, binds its SOCKS5 to loopback
+and hands it to xray under systemd supervision. A separate watchdog tracks not
+just whether the tunnel is alive, but whether the exit address is still usable —
+and reconnects to a different one when it stops being usable.
 
-Аутбаунд в xray — четыре строчки. Всё остальное делает нода.
+The xray outbound is four lines. The node does everything else.
 
-Парный проект: **[vps-warp](https://github.com/tagashi666/vps-warp)** — то же самое,
-но через Cloudflare WARP. Ставятся рядом и не конфликтуют: WARP работает на уровне
-ядра через `fwmark`, vps-psiphon — через loopback-SOCKS, так что в xray можно
-держать оба аутбаунда сразу и разводить трафик правилами.
+Companion project: **[vps-warp](https://github.com/tagashi666/vps-warp)** — the
+same idea over Cloudflare WARP. The two coexist without conflict: WARP works at
+kernel level through `fwmark`, vps-psiphon through a loopback SOCKS, so xray can
+hold both outbounds at once and split traffic by rules.
 
-> ⚠️ **Не ставьте это на сервер внутри страны, из которой обходите блокировки.**
-> Клиент Psiphon генерирует узнаваемый исходящий трафик обходного протокола: под
-> DPI (ТСПУ и аналоги) он и сам подвержен блокировке, и демаскирует сервер. Место
-> такому клиенту — на зарубежной ноде, куда вы уже дотянулись своим транспортом.
+> ⚠️ **Do not install this on a server inside the country you are circumventing.**
+> The Psiphon client generates recognisable outbound circumvention traffic: under
+> DPI it is both blockable itself and a fingerprint that exposes the server. This
+> belongs on a foreign node you already reach through your own transport.
 
-## Установка
+## Install
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Chara-Freedom/vps-psiphon/main/psiphon_install.sh)
 ```
 
-С выбором страны выхода:
+With an explicit exit country:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Chara-Freedom/vps-psiphon/main/psiphon_install.sh) --region DE
 ```
 
-Требования: root, docker, curl.
+Requires root, docker and curl.
 
-### Флаги
+### Flags
 
-| Флаг | По умолчанию | Назначение |
+| Flag | Default | Purpose |
 |---|---|---|
-| `--region CC` | авто | страна выхода, ISO 3166-1 alpha-2 |
-| `--device-region CC` | автоопределение | регион, который сообщает клиент (косметика, сервер решает по GeoIP) |
-| `--socks-port N` | 1080 | loopback-порт SOCKS5 для xray |
-| `--http-port N` | 8080 | loopback-порт HTTP-прокси |
-| `--image REF` | `swarupsengupta2007/psiphon:latest` | образ контейнера |
-| `--no-watchdog` | — | не ставить вотчдог |
+| `--region CC` | auto | exit country, ISO 3166-1 alpha-2 |
+| `--device-region CC` | autodetected | region the client reports (cosmetic — the server decides by GeoIP) |
+| `--socks-port N` | 1080 | loopback SOCKS5 port for xray |
+| `--http-port N` | 8080 | loopback HTTP proxy port |
+| `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
+| `--no-watchdog` | — | skip the watchdog |
 
-Доступные на момент написания регионы: `AT AU BE BR CA CH CZ DE DK ES FR GB ID IE
-IN IT JP NL NO PL RS SE SG US`. Пустое значение — самый быстрый сервер в любой
-стране.
+Regions available at the time of writing: `AT AU BE BR CA CH CZ DE DK ES FR GB ID
+IE IN IT JP NL NO PL RS SE SG US`. Empty means auto — the fastest server in any
+country.
 
-## Аутбаунд
+## Outbound
 
 ```json
 {
@@ -60,100 +62,102 @@ IN IT JP NL NO PL RS SE SG US`. Пустое значение — самый б�
 }
 ```
 
-Правила роутинга — на ваше усмотрение. Единственное ограничение: **не направляйте
-сюда UDP**, локальный прокси Psiphon его не поддерживает (см. «Измерения»).
+Routing rules are yours to decide. One constraint: **do not send UDP here** — the
+Psiphon local proxy does not support it (see Measurements).
 
-## Управление
+## Managing it
 
 ```
-vps-psiphon                 состояние: регион, выходной IP, пригодность выхода, трафик
-vps-psiphon rotate          свежий тоннель → другой выходной IP
-vps-psiphon region JP       сменить страну выхода
-vps-psiphon speed           50 МБ одним потоком + 4 потока агрегатом
-vps-psiphon logs [n]        лог клиента Psiphon
-vps-psiphon watchdog [n]    журнал вотчдога
-vps-psiphon uninstall       удалить
+vps-psiphon                 state: region, exit IP, whether the exit is usable, traffic
+vps-psiphon rotate          fresh tunnel → different exit IP
+vps-psiphon region JP       change exit country
+vps-psiphon speed           50 MB single stream + 4 streams aggregate
+vps-psiphon logs [n]        Psiphon client log
+vps-psiphon watchdog [n]    watchdog journal
+vps-psiphon uninstall       remove
 ```
 
-## Что ставится
+## What gets installed
 
-| Файл | Роль |
+| File | Role |
 |---|---|
-| `/etc/default/vps-psiphon` | параметры |
-| `/usr/local/sbin/vps-psiphon-run` | запуск контейнера (`ExecStart`) |
-| `/usr/local/sbin/vps-psiphon-watchdog` | живость + детектор непригодного выхода |
+| `/etc/default/vps-psiphon` | parameters |
+| `/usr/local/sbin/vps-psiphon-run` | container launcher (`ExecStart`) |
+| `/usr/local/sbin/vps-psiphon-watchdog` | liveness + unusable-exit detector |
 | `/usr/local/sbin/vps-psiphon` | CLI |
-| `vps-psiphon.service` | контейнер под супервизией systemd, `Restart=always` |
-| `vps-psiphon-watchdog.timer` | проверка раз в 10 минут |
-| `/opt/vps-psiphon/config` | конфиг Psiphon (том контейнера) |
+| `vps-psiphon.service` | container under systemd, `Restart=always` |
+| `vps-psiphon-watchdog.timer` | check every 10 minutes |
+| `/opt/vps-psiphon/config` | Psiphon config (container volume) |
 
-## Вотчдог
+## The watchdog
 
-Два режима отказа, одно действие — ротация:
+Two failure modes, one action — rotate:
 
-1. **тоннель мёртв** — SOCKS не отвечает;
-2. **выход непригоден** — Google отдаёт `302 → /sorry/index`, то есть адрес попал
-   под ограничения.
+1. **tunnel dead** — SOCKS does not answer;
+2. **exit unusable** — Google answers `302 → /sorry/index`, meaning the address has
+   been placed under restrictions.
 
-Второй режим и есть причина, по которой вотчдог существует: такой выход проходит
-любую проверку живости — трафик идёт, ошибок нет, просто часть сервисов
-перестаёт работать. Сигнатура однозначная и ложняков не даёт.
+The second mode is the reason the watchdog exists: such an exit passes every
+liveness check. Traffic flows, nothing errors, some services simply stop working.
+The signature is unambiguous and produces no false positives.
 
-Порог — 2 неудачи подряд, кулдаун между ротациями — 30 минут
-(`FAIL_THRESHOLD`, `ROTATE_COOLDOWN` в `/etc/default/vps-psiphon`).
-Журнал — `/var/log/vps-psiphon-watchdog.log`.
+Threshold is 2 consecutive failures, cooldown between rotations is 30 minutes
+(`FAIL_THRESHOLD`, `ROTATE_COOLDOWN` in `/etc/default/vps-psiphon`).
+Journal: `/var/log/vps-psiphon-watchdog.log`.
 
-Ротация здесь работает потому, что выходы Psiphon живут на разнородной чужой
-инфраструктуре: переподключение меняет и адрес, и ASN.
+Rotation works here because Psiphon exits live on heterogeneous third-party
+infrastructure — reconnecting changes both the address and the ASN.
 
-## Измерения
+## Measurements
 
-VPS в Финляндии (Hetzner, 12 CPU / 64 ГБ), август 2026, регион выхода DE.
+VPS in Finland (Hetzner, 12 CPU / 64 GB), August 2026, exit region DE.
 
-**Ограничения скорости нет.** Сервер отдаёт `TrafficRateLimits: {downstream: 0,
-upstream: 0}` при `ActiveAuthorizationIDs: []`. Гигабайт одним потоком двадцатью
-блоками по 50 МБ — ровные 20.8–23.0 Мбит/с, первый блок 22.91, двадцатый 22.93.
-Никакого «колена» после исчерпания `ReadUnthrottledBytes`. Платная подписка для
-снятия лимита не требуется.
+**There is no rate limit.** The server reports `TrafficRateLimits: {downstream: 0,
+upstream: 0}` with `ActiveAuthorizationIDs: []`. One gigabyte through a single
+stream in twenty 50 MB blocks came out flat at 20.8–23.0 Mbit/s — first block
+22.91, twentieth 22.93. No knee where `ReadUnthrottledBytes` would run out. A paid
+subscription is not needed to lift a limit that is not applied.
 
-| Что | Значение |
+| What | Value |
 |---|---|
-| Одиночный поток | ~23 Мбит/с, стабильно на дистанции в 1 ГБ |
-| Агрегат 8 потоков | 196 Мбит/с на одном немецком выходе, 53 на другом |
-| Upload, 4 потока | 62 Мбит/с |
-| TTFB до DE/NL | 0.12 с |
-| TTFB до SG | 1.11 с — одиночный поток падал до 1.6 Мбит/с из-за RTT |
-| Переподключения | ноль за весь прогон, выходной IP не менялся |
+| Single stream | ~23 Mbit/s, steady across 1 GB |
+| 8 streams aggregate | 196 Mbit/s on one German exit, 53 on another |
+| Upload, 4 streams | 62 Mbit/s |
+| TTFB to DE/NL | 0.12 s |
+| TTFB to SG | 1.11 s — a single stream fell to 1.6 Mbit/s purely from RTT |
+| Reconnects | none across the whole run, exit IP never changed |
 | UDP | `UDP ASSOCIATE` → `REP=7 COMMAND NOT SUPPORTED`; `CONNECT` → `REP=0` |
 
-Регион выхода влияет на скорость сильнее всего остального: разница между DE и SG
-из Европы — больше десяти раз. Конкретный сервер внутри региона тоже решает —
-агрегат отличался вчетверо между двумя немецкими выходами.
+Exit region affects throughput more than anything else: from Europe, DE versus SG
+differs by more than tenfold. The individual server within a region matters too —
+aggregate differed fourfold between two German exits.
 
-## Грабли
+## Pitfalls
 
-- **Префикс `BIND` в публикации портов обязателен.** Внутри контейнера psiphon
-  слушает `0.0.0.0`, поэтому `-p 1080:1080` без `127.0.0.1:` откроет публичный
-  SOCKS-прокси в интернет. В скрипте это учтено; при ручной правке — помнить.
-- **Смена региона требует стирания `/opt/vps-psiphon/config`.** Образ засевает
-  конфиг только при первом запуске, дальше `EGRESS_REGION` из окружения молча
-  игнорируется, и вы остаётесь на прежней стране, ничего об этом не зная.
-  `vps-psiphon region` делает это сам.
-- **`127.0.0.1` требует host-сети у контейнера xray.** Иначе этот адрес указывает
-  на сам контейнер xray. Скрипт проверяет и предупреждает; обходной путь —
-  поставить с `BIND=172.17.0.1` и указать этот адрес в аутбаунде.
-- **`TargetServerEntry`** в конфиге Psiphon прибивает один конкретный сервер, но
-  обнуляет пул (размер 1, без failover) и лишает возможности уехать с непригодного
-  выхода. Поэтому здесь фиксируется только регион.
+- **The `BIND` prefix on the published ports is load-bearing.** Inside the
+  container psiphon listens on `0.0.0.0`, so `-p 1080:1080` without `127.0.0.1:`
+  publishes an open SOCKS proxy to the internet. The script handles this; keep it
+  in mind if you edit by hand.
+- **Changing the region requires clearing `/opt/vps-psiphon/config`.** The image
+  seeds the config on first run only; after that `EGRESS_REGION` from the
+  environment is silently ignored and you stay in the old country without being
+  told. `vps-psiphon region` and a re-install both handle this.
+- **`127.0.0.1` requires the xray container to use host networking.** Otherwise
+  that address points at the xray container itself. The script checks and warns;
+  the workaround is to install with `BIND=172.17.0.1` and use that address in the
+  outbound.
+- **`TargetServerEntry`** in the Psiphon config pins one specific server, but it
+  collapses the pool to size 1 with no failover and removes the ability to move
+  off an unusable exit. Only the region is pinned here.
 
-## Удаление
+## Uninstall
 
 ```bash
 vps-psiphon uninstall && rm -f /usr/local/sbin/vps-psiphon
 ```
 
-## Ссылки
+## Links
 
-- [Psiphon-Labs/psiphon-tunnel-core](https://github.com/Psiphon-Labs/psiphon-tunnel-core) — сам клиент
-- [swarupsengupta2007/psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker) — образ, собирается из исходников в CI
-- [vps-warp](https://github.com/tagashi666/vps-warp) — то же самое, но для Cloudflare WARP
+- [Psiphon-Labs/psiphon-tunnel-core](https://github.com/Psiphon-Labs/psiphon-tunnel-core) — the client itself
+- [swarupsengupta2007/psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker) — the image, built from source in CI
+- [vps-warp](https://github.com/tagashi666/vps-warp) — the same thing for Cloudflare WARP
