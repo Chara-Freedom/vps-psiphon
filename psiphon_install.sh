@@ -118,6 +118,13 @@ if [ "$OLD_REGION" != "__none__" ] && [ "$OLD_REGION" != "$EGRESS_REGION" ]; the
 fi
 chown -R 1000:1000 "$CONF_DIR"
 
+# Preserve operator-set values across a reinstall.
+OLD_HEALTH_CMD=""; OLD_OK_REGIONS=""
+if [ -r "$ENVF" ]; then
+  OLD_HEALTH_CMD="$(sed -n 's/^HEALTH_CMD=//p' "$ENVF")"
+  OLD_OK_REGIONS="$(sed -n 's/^OK_REGIONS=//p' "$ENVF")"
+fi
+
 cat > "$ENVF" <<EOF
 # vps-psiphon — written by psiphon_install.sh
 IMAGE=$IMAGE
@@ -131,6 +138,18 @@ CONF_DIR=$CONF_DIR
 # watchdog tuning
 FAIL_THRESHOLD=2
 ROTATE_COOLDOWN=1800
+#
+# NOTE: this file is sourced by the shell, so any value containing spaces MUST be
+# quoted. Unquoted, everything after the first space is run as a command.
+#
+# Acceptable countries for Google's verdict when no region is pinned:
+#   OK_REGIONS='DE NL JP'
+# Ignored while EGRESS_REGION is set — then the verdict must equal that region.
+OK_REGIONS=$OLD_OK_REGIONS
+# Optional extra probe for what no unauthenticated check can see: whether the
+# service you actually care about accepts this exit. Non-zero exit = rotate.
+#   HEALTH_CMD='curl -sf --max-time 15 --socks5-hostname 127.0.0.1:$SOCKS_PORT -o /dev/null https://example.com/'
+HEALTH_CMD=$OLD_HEALTH_CMD
 EOF
 chmod 600 "$ENVF"
 
@@ -162,11 +181,20 @@ chmod 755 /usr/local/sbin/vps-psiphon-run
 # ---- watchdog ---------------------------------------------------------------
 cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #!/usr/bin/env bash
-# Two failure modes, one action (rotate = fresh tunnel = different exit IP):
-#   1. tunnel dead — SOCKS does not answer
-#   2. exit burned — Google answers 302 -> /sorry/index
-# The second is the reason this exists: a burned exit passes every liveness
-# check. Traffic flows, nothing errors, some services just stop working.
+# Rotation triggers, in order of how certain they are:
+#   1. tunnel dead   — SOCKS does not answer.
+#   2. wrong country — Google's own verdict about this exit does not match the region
+#      we asked for. YouTube publishes that verdict in its page source as "GL":"XX".
+#      This is the failure that makes Cloudflare WARP unusable for region-gated
+#      services: WARP geolocates back to the client's real country, so they refuse.
+#   3. HEALTH_CMD    — anything further that only you can verify.
+#
+# Google's /sorry captcha is recorded but never rotates on its own: a human solves
+# one in seconds, and churning the tunnel over it costs more than it saves.
+#
+# A correct country is necessary, not sufficient. An exit can sit in the right
+# country and still be refused on the address's own reputation, and no unauthenticated
+# probe sees that — which is what HEALTH_CMD is for.
 set -uo pipefail
 . /etc/default/vps-psiphon
 LOG=/var/log/vps-psiphon-watchdog.log
@@ -175,8 +203,9 @@ S=(--socks5-hostname "127.0.0.1:${SOCKS_PORT}")
 touch "$LOG" 2>/dev/null
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
-fails=0; last_rotate=0
+fails=0; last_rotate=0; captcha=0
 [ -r "$STATE" ] && . "$STATE"
+export SOCKS_PORT          # so HEALTH_CMD can reach the proxy
 
 alive=0
 # Retry once: a check that races tunnel establishment (boot, restart, rotate)
@@ -188,19 +217,41 @@ for attempt in 1 2; do
   [ "$attempt" = 1 ] && sleep 15
 done
 
-burned=0
-if [ "$alive" = 1 ]; then
+reason=""; gl=""
+if [ "$alive" = 0 ]; then
+  reason="socks-dead"
+else
+  gl="$(curl -s --max-time 25 "${S[@]}" -H 'Accept-Language: en-US' https://www.youtube.com/ 2>/dev/null \
+        | grep -oE '"GL":"[A-Z]{2}"' | head -1 | cut -d'"' -f4 || true)"
+  if [ -n "$gl" ]; then
+    if [ -n "${EGRESS_REGION:-}" ] && [ "$gl" != "$EGRESS_REGION" ]; then
+      reason="wrong-country (asked $EGRESS_REGION, Google sees $gl)"
+    elif [ -z "${EGRESS_REGION:-}" ] && [ -n "${OK_REGIONS:-}" ]; then
+      case " $OK_REGIONS " in
+        *" $gl "*) : ;;
+        *) reason="wrong-country (Google sees $gl, not in '$OK_REGIONS')" ;;
+      esac
+    fi
+  fi
+  if [ -z "$reason" ] && [ -n "${HEALTH_CMD:-}" ]; then
+    sh -c "$HEALTH_CMD" >/dev/null 2>&1 || reason="health-cmd failed"
+  fi
+  # Informational only, and logged on change so a captcha'd exit does not fill the log.
   rd="$(curl -s -o /dev/null --max-time 25 "${S[@]}" -w '%{redirect_url}' \
         'https://www.google.com/search?q=status' 2>/dev/null || true)"
-  case "$rd" in */sorry/*) burned=1 ;; esac
+  now_captcha=0; case "$rd" in */sorry/*) now_captcha=1 ;; esac
+  if [ "$now_captcha" != "$captcha" ]; then
+    [ "$now_captcha" = 1 ] && log "note: Google now serves a captcha to this exit (informational, no action)" \
+                           || log "note: Google no longer serves a captcha to this exit"
+  fi
+  captcha="$now_captcha"
 fi
 
-if [ "$alive" = 1 ] && [ "$burned" = 0 ]; then
-  [ "$fails" -gt 0 ] && log "recovered (exit $(curl -s --max-time 15 "${S[@]}" https://api.ipify.org 2>/dev/null))"
+if [ -z "$reason" ]; then
+  [ "$fails" -gt 0 ] && log "recovered (exit $(curl -s --max-time 15 "${S[@]}" https://api.ipify.org 2>/dev/null), country ${gl:-?})"
   fails=0
 else
   fails=$((fails + 1))
-  reason=$([ "$alive" = 0 ] && echo "socks-dead" || echo "exit-burned")
   log "check failed ($reason), consecutive=$fails"
 fi
 
@@ -215,7 +266,7 @@ if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] && [ $((now - last_rotate)) -ge "${RO
   fails=0; last_rotate=$now
 fi
 
-printf 'fails=%s\nlast_rotate=%s\n' "$fails" "$last_rotate" > "$STATE"
+printf 'fails=%s\nlast_rotate=%s\ncaptcha=%s\n' "$fails" "$last_rotate" "$captcha" > "$STATE"
 WD
 chmod 755 /usr/local/sbin/vps-psiphon-watchdog
 touch /var/log/vps-psiphon-watchdog.log
@@ -236,9 +287,16 @@ status() {
   echo -n "tunnels   : "; docker logs "$NAME" 2>&1 | grep -c '"noticeType":"Tunnels"' || echo 0
   echo -n "limits    : "; docker logs "$NAME" 2>&1 | grep -o '"downstreamBytesPerSecond":[0-9]*' | tail -1 || echo 'n/a'
   echo -n "exit IP   : "; curl -s --max-time 20 "${S[@]}" https://api.ipify.org 2>/dev/null || echo 'UNREACHABLE'; echo
+  local gl; gl="$(curl -s --max-time 25 "${S[@]}" -H 'Accept-Language: en-US' https://www.youtube.com/ 2>/dev/null \
+                  | grep -oE '"GL":"[A-Z]{2}"' | head -1 | cut -d'"' -f4)"
+  if [ -n "${EGRESS_REGION:-}" ] && [ -n "$gl" ] && [ "$gl" != "$EGRESS_REGION" ]; then
+    echo "country   : ${gl} — MISMATCH, asked for ${EGRESS_REGION}; region-gated services will refuse"
+  else
+    echo "country   : ${gl:-?}   (Google's own verdict about this exit)"
+  fi
   local rd; rd="$(curl -s -o /dev/null --max-time 25 "${S[@]}" -w '%{redirect_url}' 'https://www.google.com/search?q=status' 2>/dev/null)"
-  case "$rd" in */sorry/*) echo "exit state: BURNED (302 -> /sorry) — run 'vps-psiphon rotate'" ;;
-                        *) echo "exit state: clean" ;; esac
+  case "$rd" in */sorry/*) echo "captcha   : yes (informational — no rotation, a human solves it)" ;;
+                        *) echo "captcha   : no" ;; esac
   echo -n "traffic   : "; docker exec "$NAME" cat /proc/net/dev 2>/dev/null | awk '/eth0/{printf "rx %.2f GB / tx %.2f GB\n", $2/1e9, $10/1e9}' || echo 'n/a'
 }
 

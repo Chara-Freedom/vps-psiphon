@@ -68,7 +68,7 @@ Psiphon local proxy does not support it (see Measurements).
 ## Managing it
 
 ```
-vps-psiphon                 state: region, exit IP, whether the exit is usable, traffic
+vps-psiphon                 state: region, exit IP, Google's country verdict, traffic
 vps-psiphon rotate          fresh tunnel → different exit IP
 vps-psiphon region JP       change exit country
 vps-psiphon speed           50 MB single stream + 4 streams aggregate
@@ -91,22 +91,55 @@ vps-psiphon uninstall       remove
 
 ## The watchdog
 
-Two failure modes, one action — rotate:
+Three rotation triggers, in order of how certain they are:
 
-1. **tunnel dead** — SOCKS does not answer;
-2. **exit unusable** — Google answers `302 → /sorry/index`, meaning the address has
-   been placed under restrictions.
+1. **tunnel dead** — SOCKS does not answer.
+2. **wrong country** — Google's own verdict about the exit does not match the region
+   you asked for.
+3. **`HEALTH_CMD`** — an optional command of your own; a non-zero exit rotates.
 
-The second mode is the reason the watchdog exists: such an exit passes every
-liveness check. Traffic flows, nothing errors, some services simply stop working.
-The signature is unambiguous and produces no false positives.
+Google's captcha wall (`302 → /sorry/index`) is shown in `status` and logged when it
+changes, but never rotates on its own: a human solves a captcha in seconds, and
+churning the tunnel over one costs more than it saves.
 
-Threshold is 2 consecutive failures, cooldown between rotations is 30 minutes
-(`FAIL_THRESHOLD`, `ROTATE_COOLDOWN` in `/etc/default/vps-psiphon`).
-Journal: `/var/log/vps-psiphon-watchdog.log`.
+Threshold is 2 consecutive failures, cooldown between rotations 30 minutes
+(`FAIL_THRESHOLD`, `ROTATE_COOLDOWN`). Journal: `/var/log/vps-psiphon-watchdog.log`.
 
-Rotation works here because Psiphon exits live on heterogeneous third-party
+Rotation is meaningful here because Psiphon exits live on heterogeneous third-party
 infrastructure — reconnecting changes both the address and the ASN.
+
+### Why the country check is the one that matters
+
+Cloudflare announces its anycast space from the client's own region, so Google
+geolocates a WARP exit back to wherever the user actually is. Measured from a Finnish
+VPS — YouTube publishes Google's verdict in its page source as `"GL":"XX"`, which
+costs one request and no credentials:
+
+| Exit | Google's verdict |
+|---|---|
+| Psiphon, region DE | `DE` |
+| Cloudflare WARP | `RU` |
+| The VPS's own address | `FI` |
+
+Region-gated services then refuse, saying they are "not available in your country" —
+accurate from their side, thoroughly confusing from yours, and unfixable by changing
+WARP endpoints. Psiphon reports honestly: asking for JP, NL or DE yields exactly
+`JP`, `NL`, `DE`.
+
+**A correct country is necessary, not sufficient.** An exit can sit in the right
+country and still be refused on the address's own reputation, and no unauthenticated
+probe sees that. `HEALTH_CMD` is where you put a check that does.
+
+### Optional settings
+
+Both live in `/etc/default/vps-psiphon`. That file is sourced by the shell, so **any
+value containing spaces must be quoted** — unquoted, everything after the first space
+is run as a command.
+
+| Setting | Effect |
+|---|---|
+| `OK_REGIONS='DE NL JP'` | acceptable verdicts when no region is pinned; ignored while `EGRESS_REGION` is set |
+| `HEALTH_CMD='curl -sf --socks5-hostname 127.0.0.1:$SOCKS_PORT -o /dev/null https://example.com/'` | extra probe; non-zero exit rotates. `$SOCKS_PORT` is exported for it |
 
 ## Measurements
 
