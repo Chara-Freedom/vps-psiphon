@@ -107,6 +107,15 @@ say "image=$IMAGE  egress=${EGRESS_REGION:-auto}  device=$DEVICE_REGION  socks=$
 
 # ------------------------------------------------------------------ install --
 mkdir -p "$CONF_DIR"
+# Reinstalling with a different --region must actually change the region. The
+# image seeds /config once and then ignores EGRESS_REGION, so a stale config
+# would silently keep the old country.
+OLD_REGION="__none__"
+[ -r "$ENVF" ] && OLD_REGION="$(sed -n 's/^EGRESS_REGION=//p' "$ENVF")"
+if [ "$OLD_REGION" != "__none__" ] && [ "$OLD_REGION" != "$EGRESS_REGION" ]; then
+  say "egress region ${OLD_REGION:-auto} -> ${EGRESS_REGION:-auto}: clearing cached config"
+  rm -rf "${CONF_DIR:?}"/*
+fi
 chown -R 1000:1000 "$CONF_DIR"
 
 cat > "$ENVF" <<EOF
@@ -313,7 +322,10 @@ WantedBy=timers.target
 U3
 
 systemctl daemon-reload
-systemctl enable --now vps-psiphon.service
+systemctl enable vps-psiphon.service >/dev/null 2>&1
+# restart, not "enable --now": on a reinstall the service is already active and
+# would keep running with the previous parameters.
+systemctl restart vps-psiphon.service
 [ "$WATCHDOG" = 1 ] && systemctl enable --now vps-psiphon-watchdog.timer
 
 # ------------------------------------------------------------------- verify --
