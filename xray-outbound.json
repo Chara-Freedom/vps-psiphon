@@ -1,0 +1,20 @@
+// psiphon-out — локальный SOCKS5, который поднимает vps-psiphon
+//
+// port    — должен совпадать с SOCKS_PORT из /etc/default/vps-psiphon (по умолчанию 1080)
+// address — 127.0.0.1 работает, пока контейнер xray в host-сети; иначе поставить
+//           скрипт с BIND=172.17.0.1 и указать этот адрес здесь
+// TCP-only — локальный прокси Psiphon отвечает REP=7 COMMAND NOT SUPPORTED
+//            на UDP ASSOCIATE, UDP сюда направлять нельзя
+
+{
+  "tag": "psiphon-out",
+  "protocol": "socks",
+  "settings": {
+    "servers": [
+      {
+        "address": "127.0.0.1",
+        "port": 1080
+      }
+    ]
+  }
+}
