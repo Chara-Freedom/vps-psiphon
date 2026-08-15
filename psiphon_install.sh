@@ -249,6 +249,7 @@ case "${1:-status}" in
     [ -n "${2:-}" ] || { echo "usage: vps-psiphon region <CC|auto>"; exit 1; }
     r="$2"; [ "$r" = auto ] && r=""
     sed -i "s/^EGRESS_REGION=.*/EGRESS_REGION=$r/" /etc/default/vps-psiphon
+    EGRESS_REGION="$r"   # the file was sourced at startup; keep status() honest
     # The image only seeds /config on first run; an existing psiphon.config
     # silently keeps the OLD region. Wipe it or the change is a no-op.
     rm -rf "${CONF_DIR:?}"/*; mkdir -p "$CONF_DIR"; chown -R 1000:1000 "$CONF_DIR"
