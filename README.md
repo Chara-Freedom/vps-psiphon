@@ -67,9 +67,12 @@ country.
 
 Docker allocates host ports when the container starts, which is after the
 installer has written its files and enabled its units. An unchecked collision
-therefore does not fail the install — it leaves a crash-looping service behind an
-installer that reported success. Both published ports are checked up front
-instead, and the two are not treated alike:
+therefore does not fail the install. What it used to give you, in order: a service
+looping on a bind error, then about two minutes of complete silence while the
+installer waited for a tunnel — the container runs with `--rm`, so each crash
+deleted it and there was no log left to report — and then a closing "here is your
+outbound" and exit 0, over a service that had never once run. Both published ports
+are checked up front instead, and the two are not treated alike:
 
 - **SOCKS** is refused, never moved. This port is the one xray's outbound dials,
   so relocating it would leave a healthy-looking tunnel that carries no traffic.
@@ -83,8 +86,9 @@ A collision is judged the way the kernel judges it, not by comparing strings: a
 listener on `0.0.0.0` blocks every bind of that port, so a neighbouring container
 published on `0.0.0.0:8080` does collide with our `127.0.0.1:8080`.
 
-Should the container fail to start anyway, the installer reports the error,
-stops the unit so it is not looping while you read it, and exits non-zero.
+Should the container fail to start anyway, the installer reports the actual docker
+error, stops the unit so it is not looping while you read it, and exits non-zero —
+about three seconds from launch, rather than two minutes of nothing.
 
 ## Outbound
 

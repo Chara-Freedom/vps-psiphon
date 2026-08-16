@@ -84,8 +84,11 @@ command -v curl >/dev/null || die "curl is not installed"
 # --------------------------------------------------------- port arbitration --
 # Docker allocates host ports when the container starts, which is long after this
 # script has written its files and enabled its units. An unchecked collision
-# therefore does not fail the install — it produces a crash-looping service and
-# an installer that reports success. Both published ports get cleared up front.
+# therefore does not fail the install. What it produces instead, in this order: a
+# service looping on a bind error, then two minutes of silence from the wait loop
+# below — the container is `--rm`, so every crash deletes it and `docker logs` has
+# nothing to report — and finally the closing "here is your outbound" and exit 0,
+# over a service that has never once run. Both published ports get cleared up front.
 #
 # Whether two binds collide is the kernel's rule, not string equality: a listener
 # on 0.0.0.0 (or ::) blocks every bind of that port, while one on a specific
@@ -533,10 +536,11 @@ systemctl restart vps-psiphon.service
 # ------------------------------------------------------------------- verify --
 say "waiting for the tunnel"
 # Watch the unit, not just the log. Restart=always means a container that cannot
-# start does not stay dead quietly — it loops, and a loop that is never noticed
-# is how an installer ends up reporting success over a service that has never
-# once run. systemd reports an auto-restarting unit as "activating", so anything
-# other than "active" here is the failure, caught within seconds.
+# start does not stay dead quietly — it loops, and this loop used to wait out all
+# sixty iterations against a container that `--rm` had already deleted: no output,
+# no error, ~2 minutes, then a success-shaped ending and exit 0. systemd reports an
+# auto-restarting unit as "activating", so anything other than "active" here is the
+# failure — caught in one iteration, ~3 s in practice.
 TUNNEL_UP=0
 for i in $(seq 1 60); do
   systemctl is-active --quiet vps-psiphon.service || break
