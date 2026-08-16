@@ -30,8 +30,12 @@ HTTP_PORT="${HTTP_PORT:-8080}"
 EGRESS_REGION="${EGRESS_REGION:-}"
 DEVICE_REGION="${DEVICE_REGION:-}"
 WATCHDOG=1
+PUBLISH_HTTP=1
 CONF_DIR=/opt/vps-psiphon/config
 ENVF=/etc/default/vps-psiphon
+# Ports asked for explicitly are honoured or refused, never silently moved.
+SOCKS_PORT_SET=0
+HTTP_PORT_SET=0
 
 usage() {
   cat <<'U'
@@ -42,8 +46,13 @@ psiphon_install.sh [options]
                        JP NL NO PL RS SE SG US
   --device-region CC   region the client reports. Cosmetic — the server decides
                        by GeoIP. Default: autodetected from this host.
-  --socks-port N       loopback SOCKS5 port for xray, default 1080
-  --http-port N        loopback HTTP proxy port, default 8080
+  --socks-port N       loopback SOCKS5 port for xray, default 1080. Refused if
+                       taken — xray's outbound names this port, so moving it
+                       behind your back would leave a tunnel nothing routes to.
+  --http-port N        loopback HTTP proxy port, default 8080. Nothing here
+                       consumes it, so a taken default is moved to the next free
+                       port; a port you name explicitly is refused instead.
+  --no-http            do not publish the HTTP proxy at all
   --image REF          container image, default swarupsengupta2007/psiphon:latest
   --no-watchdog        skip the watchdog
 U
@@ -53,8 +62,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --region)        EGRESS_REGION="${2:-}"; shift 2 ;;
     --device-region) DEVICE_REGION="${2:-}"; shift 2 ;;
-    --socks-port)    SOCKS_PORT="${2:?}";    shift 2 ;;
-    --http-port)     HTTP_PORT="${2:?}";     shift 2 ;;
+    --socks-port)    SOCKS_PORT="${2:?}"; SOCKS_PORT_SET=1; shift 2 ;;
+    --http-port)     HTTP_PORT="${2:?}";  HTTP_PORT_SET=1;  shift 2 ;;
+    --no-http)       PUBLISH_HTTP=0;         shift   ;;
     --image)         IMAGE="${2:?}";         shift 2 ;;
     --no-watchdog)   WATCHDOG=0;             shift   ;;
     -h|--help)       usage; exit 0 ;;
@@ -71,13 +81,97 @@ command -v docker >/dev/null || die "docker is not installed"
 docker info >/dev/null 2>&1 || die "docker daemon is not running"
 command -v curl >/dev/null || die "curl is not installed"
 
+# --------------------------------------------------------- port arbitration --
+# Docker allocates host ports when the container starts, which is long after this
+# script has written its files and enabled its units. An unchecked collision
+# therefore does not fail the install — it produces a crash-looping service and
+# an installer that reports success. Both published ports get cleared up front.
+#
+# Whether two binds collide is the kernel's rule, not string equality: a listener
+# on 0.0.0.0 (or ::) blocks every bind of that port, while one on a specific
+# address blocks only that address. That asymmetry is the whole bug — a bot
+# publishing 0.0.0.0:8080 collides with our 127.0.0.1:8080, which never looks
+# like a conflict if you compare addresses literally.
+#
+# Prints who holds $1 when a bind on $2 would collide; exit 0 = taken, 1 = free.
+port_conflict() {
+  local port="$1" bind="$2" line field addr label ct
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    addr=""
+    for field in $line; do
+      case "$field" in *:"$port") addr="${field%:"$port"}"; break ;; esac
+    done
+    [ -n "$addr" ] || continue
+    case "$addr" in
+      '0.0.0.0'|'*'|'[::]'|'::') : ;;   # wildcard: blocks any bind of this port
+      "$bind")                   : ;;   # same address
+      *) continue ;;                    # some other specific address: no clash
+    esac
+    label="$(printf '%s\n' "$line" \
+             | sed -n 's/.*users:((\"\([^\"]*\)\",pid=\([0-9]\{1,\}\).*/\1 (pid \2)/p')"
+    [ -n "$label" ] || label="an unidentified listener"
+    # Every published container port is held by docker-proxy, so that name alone
+    # tells the operator nothing. Ask docker which container is behind it.
+    case "$label" in
+      docker-proxy*)
+        ct="$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null \
+              | awk -v pat=":$port->" 'index($0, pat) { print $1; exit }')"
+        [ -n "$ct" ] && label="container '$ct'"
+        ;;
+    esac
+    printf '%s\n' "$label"
+    return 0
+  done <<EOF
+$(ss -tlnpH "sport = :$port" 2>/dev/null)
+EOF
+  return 1
+}
+
+# First port at or above $1 that is free for a bind on $2.
+free_port() {
+  local port="$1" bind="$2" tries=0
+  while [ "$tries" -lt 100 ]; do
+    port_conflict "$port" "$bind" >/dev/null || { printf '%s\n' "$port"; return 0; }
+    port=$((port + 1)); tries=$((tries + 1))
+  done
+  return 1
+}
+
 # Re-running over an existing install must work. The listener on our port is
 # docker-proxy, never a process called "$NAME", so ask docker who owns it.
-if ss -tlnH "sport = :$SOCKS_PORT" 2>/dev/null | grep -q . ; then
-  if docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
+SOCKS_HOLDER="$(port_conflict "$SOCKS_PORT" "$BIND" || true)"
+if [ -n "$SOCKS_HOLDER" ]; then
+  if [ "$SOCKS_HOLDER" = "container '$NAME'" ]; then
     say "port $SOCKS_PORT held by the existing '$NAME' container — reinstalling over it"
   else
-    die "port $SOCKS_PORT is already in use by something else"
+    ALT="$(free_port $((SOCKS_PORT + 1)) "$BIND" || true)"
+    die "SOCKS port $SOCKS_PORT is taken by ${SOCKS_HOLDER}.
+       This port is the one xray's outbound dials, so it is never moved for you:
+       a tunnel on a port nothing routes to looks healthy and carries no traffic.
+       Re-run with --socks-port ${ALT:-<a free port>} and set the same port in the
+       outbound, or free $SOCKS_PORT first."
+  fi
+fi
+
+# The HTTP proxy is a convenience nothing in this setup consumes, so a busy
+# default is worth working around rather than dying on. An explicitly requested
+# port is a different matter — honour the request or refuse it, never reinterpret.
+if [ "$PUBLISH_HTTP" = 1 ]; then
+  HTTP_HOLDER="$(port_conflict "$HTTP_PORT" "$BIND" || true)"
+  if [ -n "$HTTP_HOLDER" ] && [ "$HTTP_HOLDER" != "container '$NAME'" ]; then
+    if [ "$HTTP_PORT_SET" = 1 ]; then
+      die "HTTP port $HTTP_PORT is taken by ${HTTP_HOLDER}.
+       Choose another with --http-port N, or drop it entirely with --no-http."
+    fi
+    ALT="$(free_port $((HTTP_PORT + 1)) "$BIND" || true)"
+    if [ -n "$ALT" ]; then
+      say "HTTP proxy port $HTTP_PORT is taken by ${HTTP_HOLDER} — publishing it on $ALT instead"
+      HTTP_PORT="$ALT"
+    else
+      say "HTTP proxy port $HTTP_PORT is taken by ${HTTP_HOLDER} and no free port found — publishing SOCKS only"
+      PUBLISH_HTTP=0
+    fi
   fi
 fi
 
@@ -109,7 +203,8 @@ if [ -z "$DEVICE_REGION" ]; then
   [ -n "$DEVICE_REGION" ] || DEVICE_REGION="US"
 fi
 
-say "image=$IMAGE  egress=${EGRESS_REGION:-auto}  device=$DEVICE_REGION  socks=$BIND:$SOCKS_PORT"
+if [ "$PUBLISH_HTTP" = 1 ]; then HTTP_DESC="$BIND:$HTTP_PORT"; else HTTP_DESC="not published"; fi
+say "image=$IMAGE  egress=${EGRESS_REGION:-auto}  device=$DEVICE_REGION  socks=$BIND:$SOCKS_PORT  http=$HTTP_DESC"
 
 # ------------------------------------------------------------------ install --
 mkdir -p "$CONF_DIR"
@@ -138,6 +233,7 @@ NAME=$NAME
 BIND=$BIND
 SOCKS_PORT=$SOCKS_PORT
 HTTP_PORT=$HTTP_PORT
+PUBLISH_HTTP=$PUBLISH_HTTP
 EGRESS_REGION=$EGRESS_REGION
 DEVICE_REGION=$DEVICE_REGION
 CONF_DIR=$CONF_DIR
@@ -173,9 +269,12 @@ set -euo pipefail
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 # NOTE: the BIND prefix is load-bearing. Publishing without it exposes an OPEN
 # SOCKS5 PROXY to the internet — psiphon binds 0.0.0.0 inside the container.
+PUB=( -p "${BIND}:${SOCKS_PORT}:${SOCKS_PORT}" )
+# Default to publishing it, so env files written before this was an option keep
+# their old behaviour instead of silently losing the HTTP proxy.
+[ "${PUBLISH_HTTP:-1}" = 1 ] && PUB+=( -p "${BIND}:${HTTP_PORT}:${HTTP_PORT}" )
 exec docker run --rm --name "$NAME" \
-  -p "${BIND}:${SOCKS_PORT}:${SOCKS_PORT}" \
-  -p "${BIND}:${HTTP_PORT}:${HTTP_PORT}" \
+  "${PUB[@]}" \
   -e PUID=1000 -e PGID=1000 \
   -e SOCKS_PORT="$SOCKS_PORT" -e HTTP_PORT="$HTTP_PORT" \
   -e DEVICE_REGION="$DEVICE_REGION" -e EGRESS_REGION="$EGRESS_REGION" \
@@ -288,6 +387,8 @@ set -uo pipefail
 IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
 NAME="${NAME:-vps-psiphon}"
 SOCKS_PORT="${SOCKS_PORT:-1080}"
+HTTP_PORT="${HTTP_PORT:-8080}"
+PUBLISH_HTTP="${PUBLISH_HTTP:-1}"
 CONF_DIR="${CONF_DIR:-/opt/vps-psiphon/config}"
 S=(--socks5-hostname "127.0.0.1:${SOCKS_PORT}")
 
@@ -296,6 +397,11 @@ status() {
   echo "service   : $(systemctl is-active vps-psiphon.service) / $(systemctl is-enabled vps-psiphon.service 2>/dev/null)"
   echo "watchdog  : $(systemctl is-active vps-psiphon-watchdog.timer) / $(systemctl is-enabled vps-psiphon-watchdog.timer 2>/dev/null)"
   echo "socks     : 127.0.0.1:${SOCKS_PORT}   (region requested: ${EGRESS_REGION:-auto})"
+  if [ "$PUBLISH_HTTP" = 1 ]; then
+    echo "http      : 127.0.0.1:${HTTP_PORT}   (unused by xray; handy for curl -x)"
+  else
+    echo "http      : not published"
+  fi
   echo -n "server    : "; docker logs "$NAME" 2>&1 | grep -o '"serverRegion":"[A-Z]*"' | tail -1 || echo '?'
   echo -n "tunnels   : "; docker logs "$NAME" 2>&1 | grep -c '"noticeType":"Tunnels"' || echo 0
   echo -n "limits    : "; docker logs "$NAME" 2>&1 | grep -o '"downstreamBytesPerSecond":[0-9]*' | tail -1 || echo 'n/a'
@@ -426,10 +532,35 @@ systemctl restart vps-psiphon.service
 
 # ------------------------------------------------------------------- verify --
 say "waiting for the tunnel"
+# Watch the unit, not just the log. Restart=always means a container that cannot
+# start does not stay dead quietly — it loops, and a loop that is never noticed
+# is how an installer ends up reporting success over a service that has never
+# once run. systemd reports an auto-restarting unit as "activating", so anything
+# other than "active" here is the failure, caught within seconds.
+TUNNEL_UP=0
 for i in $(seq 1 60); do
-  docker logs "$NAME" 2>&1 | grep -q '"noticeType":"Tunnels"' && break
+  systemctl is-active --quiet vps-psiphon.service || break
+  docker logs "$NAME" 2>&1 | grep -q '"noticeType":"Tunnels"' && { TUNNEL_UP=1; break; }
   sleep 2
 done
+
+if [ "$TUNNEL_UP" = 0 ] && ! systemctl is-active --quiet vps-psiphon.service; then
+  echo >&2
+  printf '\033[1;31mERROR:\033[0m the tunnel never started.\n' >&2
+  journalctl -u vps-psiphon.service -n 40 --no-pager 2>/dev/null \
+    | grep -iE 'error|failed|cannot|denied' | tail -5 | sed 's/^/    /' >&2
+  # Stop it rather than leave docker being hammered every 10s while you read this.
+  systemctl stop vps-psiphon.service >/dev/null 2>&1 || true
+  echo >&2
+  echo "    The service is stopped, not looping. Fix the cause and re-run this" >&2
+  echo "    installer, or 'vps-psiphon uninstall' to remove what was written." >&2
+  exit 1
+fi
+
+if [ "$TUNNEL_UP" = 0 ]; then
+  say "no tunnel after 120s, but the service is alive — leaving it to keep trying"
+  say "watch it with:  vps-psiphon logs"
+fi
 sleep 3
 echo
 /usr/local/sbin/vps-psiphon status
