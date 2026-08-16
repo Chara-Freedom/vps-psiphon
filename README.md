@@ -50,6 +50,12 @@ hold both outbounds at once and split traffic by rules.
 > assume, since this is the kind of edit that silently does not apply: `ss -tlnp |
 > grep -E '1080|8080'` must show `127.0.0.1`, never `0.0.0.0` or `[::]`.
 
+## Links
+
+- [Psiphon-Labs/psiphon-tunnel-core](https://github.com/Psiphon-Labs/psiphon-tunnel-core) — the client itself
+- [swarupsengupta2007/psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker) — the image, built from source in CI
+- [vps-warp](https://github.com/tagashi666/vps-warp) — the same thing for Cloudflare WARP
+
 ## Install
 
 ```bash
@@ -286,9 +292,3 @@ vps-psiphon uninstall
 Removes the units, the container, the image, the config directory, the watchdog log
 and state — and finally unlinks itself, so nothing is left to clean up by hand. It
 then checks the disk and, if anything survived, names it and exits non-zero.
-
-## Links
-
-- [Psiphon-Labs/psiphon-tunnel-core](https://github.com/Psiphon-Labs/psiphon-tunnel-core) — the client itself
-- [swarupsengupta2007/psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker) — the image, built from source in CI
-- [vps-warp](https://github.com/tagashi666/vps-warp) — the same thing for Cloudflare WARP

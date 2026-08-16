@@ -50,6 +50,12 @@ Psiphon как выходная точка для ноды xray/remnawave.
 > предполагайте, правка как раз из тех, что молча не применяются: `ss -tlnp | grep -E
 > '1080|8080'` должен показывать `127.0.0.1`, а не `0.0.0.0` или `[::]`.
 
+## Ссылки
+
+- [Psiphon-Labs/psiphon-tunnel-core](https://github.com/Psiphon-Labs/psiphon-tunnel-core) — сам клиент
+- [swarupsengupta2007/psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker) — образ, собирается из исходников в CI
+- [vps-warp](https://github.com/tagashi666/vps-warp) — то же самое, но для Cloudflare WARP
+
 ## Установка
 
 ```bash
@@ -288,9 +294,3 @@ vps-psiphon uninstall
 Удаляет юниты, контейнер, образ, каталог конфига, журнал и состояние вотчдога — и в
 конце снимает сам себя, так что подчищать руками нечего. После этого сверяется с
 диском и, если что-то уцелело, называет это и возвращает ненулевой код.
-
-## Ссылки
-
-- [Psiphon-Labs/psiphon-tunnel-core](https://github.com/Psiphon-Labs/psiphon-tunnel-core) — сам клиент
-- [swarupsengupta2007/psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker) — образ, собирается из исходников в CI
-- [vps-warp](https://github.com/tagashi666/vps-warp) — то же самое, но для Cloudflare WARP
