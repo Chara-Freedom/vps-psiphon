@@ -9,7 +9,7 @@ and hands it to xray under systemd supervision. A separate watchdog tracks not
 just whether the tunnel is alive, but whether the exit address is still usable —
 and reconnects to a different one when it stops being usable.
 
-The xray outbound is four lines. The node does everything else.
+The xray outbound is five lines. The node does everything else.
 
 Companion project: **[vps-warp](https://github.com/tagashi666/vps-warp)** — the
 same idea over Cloudflare WARP. The two coexist without conflict: WARP works at
