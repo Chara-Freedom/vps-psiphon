@@ -43,12 +43,36 @@ Requires root, docker and curl.
 | `--device-region CC` | autodetected | region the client reports (cosmetic — the server decides by GeoIP) |
 | `--socks-port N` | 1080 | loopback SOCKS5 port for xray |
 | `--http-port N` | 8080 | loopback HTTP proxy port |
+| `--no-http` | — | do not publish the HTTP proxy at all |
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
 | `--no-watchdog` | — | skip the watchdog |
 
 Regions available at the time of writing: `AT AU BE BR CA CH CZ DE DK ES FR GB ID
 IE IN IT JP NL NO PL RS SE SG US`. Empty means auto — the fastest server in any
 country.
+
+### Ports already in use
+
+Docker allocates host ports when the container starts, which is after the
+installer has written its files and enabled its units. An unchecked collision
+therefore does not fail the install — it leaves a crash-looping service behind an
+installer that reported success. Both published ports are checked up front
+instead, and the two are not treated alike:
+
+- **SOCKS** is refused, never moved. This port is the one xray's outbound dials,
+  so relocating it would leave a healthy-looking tunnel that carries no traffic.
+  The error names the process or container holding the port and suggests a free
+  one for `--socks-port`.
+- **HTTP** is moved to the next free port, because nothing in this setup consumes
+  it. A port you name explicitly with `--http-port` is refused rather than
+  reinterpreted; `--no-http` skips publishing it entirely.
+
+A collision is judged the way the kernel judges it, not by comparing strings: a
+listener on `0.0.0.0` blocks every bind of that port, so a neighbouring container
+published on `0.0.0.0:8080` does collide with our `127.0.0.1:8080`.
+
+Should the container fail to start anyway, the installer reports the error,
+stops the unit so it is not looping while you read it, and exits non-zero.
 
 ## Outbound
 
