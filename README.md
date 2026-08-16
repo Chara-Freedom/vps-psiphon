@@ -21,6 +21,18 @@ hold both outbounds at once and split traffic by rules.
 > DPI it is both blockable itself and a fingerprint that exposes the server. This
 > belongs on a foreign node you already reach through your own transport.
 
+> ⚠️ **Running the image by hand is not equivalent, and the difference is a public
+> open proxy.** Psiphon listens on `0.0.0.0` inside the container, so the plain
+> `docker run -p 1080:1080` — or the compose snippet you will find alongside the
+> image — publishes SOCKS5, and the HTTP proxy with it, on *every* address the host
+> has, with no authentication. Port 1080 is scanned continuously; an exposed one is
+> found within hours and lands on public open-proxy lists, from where reputation
+> blocklists pick it up — being an open proxy is a listable condition on its own,
+> independent of anything you send. After that, strangers' traffic leaves through
+> your tunnel, on your bandwidth, and any egress filtering you run by port number
+> does not see it: whatever they do is encapsulated inside the tunnel's own
+> connection. This script publishes on `127.0.0.1` for that reason.
+
 ## Install
 
 ```bash
@@ -225,6 +237,13 @@ aggregate differed fourfold between two German exits.
   container psiphon listens on `0.0.0.0`, so `-p 1080:1080` without `127.0.0.1:`
   publishes an open SOCKS proxy to the internet. The script handles this; keep it
   in mind if you edit by hand.
+- **A host firewall does not contain a published container port.** Docker's publish
+  is a DNAT rule in `nat/PREROUTING`, which runs before the filter rules ufw
+  manages, so `ufw deny 1080` on an exposed port changes nothing and "the firewall
+  is up" is not evidence the port is closed. Check what is actually listening —
+  `ss -tlnp | grep 1080` should show `127.0.0.1`, never `0.0.0.0` or `[::]`. If you
+  must leave a port published wider, filter it in the `DOCKER-USER` chain, which
+  docker consults first.
 - **Changing the region requires clearing `/opt/vps-psiphon/config`.** The image
   seeds the config on first run only; after that `EGRESS_REGION` from the
   environment is silently ignored and you stay in the old country without being
