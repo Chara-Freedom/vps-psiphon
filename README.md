@@ -32,6 +32,23 @@ hold both outbounds at once and split traffic by rules.
 > your tunnel, on your bandwidth, and any egress filtering you run by port number
 > does not see it: whatever they do is encapsulated inside the tunnel's own
 > connection. This script publishes on `127.0.0.1` for that reason.
+>
+> If you use the image by hand regardless, the published ports are what you have to
+> change — both of them, in the compose file the image ships with:
+>
+> ```yaml
+> ports:
+>   - "127.0.0.1:1080:1080"   # shipped as 1080:1080
+>   - "127.0.0.1:8080:8080"   # shipped as 8080:8080
+> ```
+>
+> and `-p 127.0.0.1:1080:1080` likewise for the `docker run` line next to it. The
+> address prefix is the entire fix: `SOCKS_PORT` and `HTTP_PORT` stay as they are,
+> because they decide where psiphon listens inside the container, not who may reach
+> it from outside. Delete the 8080 entry altogether if you have no use for the HTTP
+> proxy — an unpublished port cannot be exposed by mistake. Then verify rather than
+> assume, since this is the kind of edit that silently does not apply: `ss -tlnp |
+> grep -E '1080|8080'` must show `127.0.0.1`, never `0.0.0.0` or `[::]`.
 
 ## Install
 
