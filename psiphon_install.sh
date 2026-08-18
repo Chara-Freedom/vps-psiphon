@@ -529,7 +529,9 @@ case "${1:-status}" in
     [ -n "$moved" ] && echo "region    : $moved"
     systemctl restart vps-psiphon.service; sleep 45; status ;;
   pool)
-    [ -n "${2:-}" ] || { echo "usage: vps-psiphon pool '<CC CC …>'   (empty string clears it)"; exit 1; }
+    # An empty string is a valid argument here — it clears the pool — so this
+    # tests for a MISSING argument, not an empty one.
+    [ $# -ge 2 ] || { echo "usage: vps-psiphon pool '<CC CC …>'   (empty string clears it)"; exit 1; }
     np="$(printf '%s' "$2" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
     sed -i "s/^REGION_POOL=.*/REGION_POOL='$np'/" /etc/default/vps-psiphon
     REGION_POOL="$np"
