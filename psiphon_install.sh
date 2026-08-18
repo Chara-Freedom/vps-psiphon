@@ -601,7 +601,7 @@ case "${1:-status}" in
       && echo "note: image $IMAGE kept, something else on this host references it"
     [ -n "$left" ] && { echo "removed, but these remain:$left" >&2; exit 1; }
     echo "removed: units, container, image, config, state, log — and this CLI itself" ;;
-  *) echo "usage: vps-psiphon {status|rotate|region <CC>|speed|logs [n]|watchdog [n]|uninstall}" ;;
+  *) echo "usage: vps-psiphon {status|rotate|region <CC>|pool '<CC CC …>'|speed|logs [n]|watchdog [n]|uninstall}" ;;
 esac
 CLI
 chmod 755 /usr/local/sbin/vps-psiphon
@@ -695,4 +695,4 @@ cat <<OUT
     { "tag": "psiphon-out", "protocol": "socks",
       "settings": { "address": "127.0.0.1", "port": $SOCKS_PORT } }
 OUT
-say "manage with:  vps-psiphon {status|rotate|region <CC>|speed|logs|uninstall}"
+say "manage with:  vps-psiphon {status|rotate|region <CC>|pool '<CC CC …>'|speed|logs|uninstall}"
