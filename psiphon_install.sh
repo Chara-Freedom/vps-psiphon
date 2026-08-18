@@ -28,6 +28,7 @@ BIND="${BIND:-127.0.0.1}"
 SOCKS_PORT="${SOCKS_PORT:-1080}"
 HTTP_PORT="${HTTP_PORT:-8080}"
 EGRESS_REGION="${EGRESS_REGION:-}"
+REGION_POOL=""; REGION_POOL_SET=0
 DEVICE_REGION="${DEVICE_REGION:-}"
 WATCHDOG=1
 PUBLISH_HTTP=1
@@ -40,10 +41,15 @@ HTTP_PORT_SET=0
 usage() {
   cat <<'U'
 psiphon_install.sh [options]
-  --region CC          egress country (ISO 3166-1 alpha-2). Empty = auto, the
-                       fastest server in any country. Available at the time of
-                       writing: AT AU BE BR CA CH CZ DE DK ES FR GB ID IE IN IT
-                       JP NL NO PL RS SE SG US
+  --region CC[,CC…]    egress country (ISO 3166-1 alpha-2). Empty = auto, the
+                       fastest server in any country. Give several, comma-
+                       separated, to form a POOL: every rotation advances to the
+                       next country in it. That widens the server choice when one
+                       country is congested, while keeping the exit inside a set
+                       you chose — unlike auto, which may land on another
+                       continent and cost you the latency. Available at the time
+                       of writing: AT AU BE BR CA CH CZ DE DK ES FR GB ID IE IN
+                       IT JP NL NO PL RS SE SG US
   --device-region CC   region the client reports. Cosmetic — the server decides
                        by GeoIP. Default: autodetected from this host.
   --socks-port N       loopback SOCKS5 port for xray, default 1080. Refused if
@@ -60,7 +66,14 @@ U
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --region)        EGRESS_REGION="${2:-}"; shift 2 ;;
+    --region)
+      # One country behaves as before. Several make a pool the watchdog walks
+      # on each rotation — a wider server choice without "auto" reaching
+      # another continent.
+      REGION_POOL="$(printf '%s' "${2:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
+      EGRESS_REGION="${REGION_POOL%% *}"
+      [ "$REGION_POOL" = "$EGRESS_REGION" ] && REGION_POOL=""
+      REGION_POOL_SET=1; shift 2 ;;
     --device-region) DEVICE_REGION="${2:-}"; shift 2 ;;
     --socks-port)    SOCKS_PORT="${2:?}"; SOCKS_PORT_SET=1; shift 2 ;;
     --http-port)     HTTP_PORT="${2:?}";  HTTP_PORT_SET=1;  shift 2 ;;
@@ -223,11 +236,14 @@ fi
 chown -R 1000:1000 "$CONF_DIR"
 
 # Preserve operator-set values across a reinstall.
-OLD_HEALTH_CMD=""; OLD_OK_REGIONS=""; OLD_MIN_THROUGHPUT=""
+OLD_HEALTH_CMD=""; OLD_OK_REGIONS=""; OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""
 if [ -r "$ENVF" ]; then
   OLD_HEALTH_CMD="$(sed -n 's/^HEALTH_CMD=//p' "$ENVF")"
   OLD_OK_REGIONS="$(sed -n 's/^OK_REGIONS=//p' "$ENVF")"
   OLD_MIN_THROUGHPUT="$(sed -n 's/^MIN_THROUGHPUT_KBPS=//p' "$ENVF")"
+  OLD_REGION_POOL="$(sed -n 's/^REGION_POOL=//p' "$ENVF" | tr -d "'")"
+  # An explicit --region wins; otherwise an existing pool survives the reinstall.
+  [ "$REGION_POOL_SET" = 1 ] || REGION_POOL="$OLD_REGION_POOL"
 fi
 
 cat > "$ENVF" <<EOF
@@ -260,6 +276,13 @@ OK_REGIONS=$OLD_OK_REGIONS
 # Psiphon picks a server per tunnel, and a bad pick otherwise persists indefinitely
 # while liveness and country both read green. 0 disables the gate.
 MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-100}
+# Countries to rotate through, space separated. Empty = stay in EGRESS_REGION and
+# only change server within it. A pool is what you want when one country is busy:
+# each rotation advances to the next entry, so the retry draws on a different
+# country's servers instead of the same crowded set. Keep them near each other —
+# the pool is also what stops the watchdog calling a legitimate exit "wrong
+# country", so anything you list here you are accepting as a destination.
+REGION_POOL='$REGION_POOL'
 HEALTH_CMD=$OLD_HEALTH_CMD
 EOF
 chmod 600 "$ENVF"
@@ -292,6 +315,43 @@ exec docker run --rm --name "$NAME" \
 RUN
 chmod 755 /usr/local/sbin/vps-psiphon-run
 
+# ---- region pool ------------------------------------------------------------
+cat > /usr/local/sbin/vps-psiphon-advance-region <<'ADV'
+#!/usr/bin/env bash
+# Advance EGRESS_REGION to the next country in REGION_POOL and apply it. Prints
+# "old -> new" when it changes anything, and stays silent when there is no pool.
+#
+# Rotating within one country retries that country's servers — exactly the set
+# that is exhausted when it is busy. Walking a pool draws on a different country
+# instead, without handing the choice to "auto", which may answer from another
+# continent.
+#
+# The region is applied by rewriting psiphon.config in place: the image seeds that
+# file only when it is absent, so the edit sticks. That is deliberately gentler
+# than the `region` subcommand, which wipes the config directory and throws away
+# the client's cached server list along with it.
+set -uo pipefail
+ENVF=/etc/default/vps-psiphon
+[ -r "$ENVF" ] && . "$ENVF"
+[ -n "${REGION_POOL:-}" ] || exit 0
+
+cur="${EGRESS_REGION:-}"; first=""; nxt=""; take=0
+for r in $REGION_POOL; do
+  [ -z "$first" ] && first="$r"
+  if [ "$take" = 1 ]; then nxt="$r"; break; fi
+  [ "$r" = "$cur" ] && take=1
+done
+# Not in the pool (hand-edited, or the pool changed under us) falls to the first
+# entry, which is also what makes the last entry wrap around.
+[ -n "$nxt" ] || nxt="$first"
+[ "$nxt" = "$cur" ] && exit 0
+
+sed -i "s/^EGRESS_REGION=.*/EGRESS_REGION=$nxt/" "$ENVF"
+cfg="${CONF_DIR:-/opt/vps-psiphon/config}/psiphon.config"
+[ -f "$cfg" ] && sed -i -E "s/\"EgressRegion\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"EgressRegion\": \"$nxt\"/" "$cfg"
+printf '%s -> %s\n' "${cur:-auto}" "$nxt"
+ADV
+chmod 0755 /usr/local/sbin/vps-psiphon-advance-region
 # ---- watchdog ---------------------------------------------------------------
 cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #!/usr/bin/env bash
@@ -349,7 +409,15 @@ else
   rm -f "$ytf"
   kbps=$(( ${spd%%.*} / 1024 ))
   if [ -n "$gl" ]; then
-    if [ -n "${EGRESS_REGION:-}" ] && [ "$gl" != "$EGRESS_REGION" ]; then
+    # With a pool, every country in it is a destination we accepted, so the
+    # verdict is judged against the whole pool — otherwise the watchdog would
+    # call its own last rotation a wrong-country failure and rotate forever.
+    if [ -n "${REGION_POOL:-}" ]; then
+      case " $REGION_POOL " in
+        *" $gl "*) : ;;
+        *) reason="wrong-country (Google sees $gl, not in pool '$REGION_POOL')" ;;
+      esac
+    elif [ -n "${EGRESS_REGION:-}" ] && [ "$gl" != "$EGRESS_REGION" ]; then
       reason="wrong-country (asked $EGRESS_REGION, Google sees $gl)"
     elif [ -z "${EGRESS_REGION:-}" ] && [ -n "${OK_REGIONS:-}" ]; then
       case " $OK_REGIONS " in
@@ -395,6 +463,8 @@ now=$(date +%s)
 if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] && [ $((now - last_rotate)) -ge "${ROTATE_COOLDOWN:-1800}" ]; then
   old="$(curl -s --max-time 15 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
   log "rotating away from exit $old"
+  moved="$(/usr/local/sbin/vps-psiphon-advance-region 2>/dev/null)"
+  [ -n "$moved" ] && log "region $moved"
   systemctl restart vps-psiphon.service
   sleep 45
   new="$(curl -s --max-time 20 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
@@ -428,6 +498,7 @@ status() {
   echo "service   : $(systemctl is-active vps-psiphon.service) / $(systemctl is-enabled vps-psiphon.service 2>/dev/null)"
   echo "watchdog  : $(systemctl is-active vps-psiphon-watchdog.timer) / $(systemctl is-enabled vps-psiphon-watchdog.timer 2>/dev/null)"
   echo "socks     : 127.0.0.1:${SOCKS_PORT}   (region requested: ${EGRESS_REGION:-auto})"
+  [ -n "${REGION_POOL:-}" ] && echo "pool      : ${REGION_POOL}   (each rotation advances one step)"
   if [ "$PUBLISH_HTTP" = 1 ]; then
     echo "http      : 127.0.0.1:${HTTP_PORT}   (unused by xray; handy for curl -x)"
   else
@@ -452,7 +523,26 @@ status() {
 
 case "${1:-status}" in
   status) status ;;
-  rotate) echo "rotating (fresh tunnel, new exit)…"; systemctl restart vps-psiphon.service; sleep 45; status ;;
+  rotate)
+    echo "rotating (fresh tunnel, new exit)…"
+    moved="$(/usr/local/sbin/vps-psiphon-advance-region 2>/dev/null)"
+    [ -n "$moved" ] && echo "region    : $moved"
+    systemctl restart vps-psiphon.service; sleep 45; status ;;
+  pool)
+    [ -n "${2:-}" ] || { echo "usage: vps-psiphon pool '<CC CC …>'   (empty string clears it)"; exit 1; }
+    np="$(printf '%s' "$2" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
+    sed -i "s/^REGION_POOL=.*/REGION_POOL='$np'/" /etc/default/vps-psiphon
+    REGION_POOL="$np"
+    if [ -n "$np" ]; then
+      echo "pool      : $np"
+      case " $np " in
+        *" ${EGRESS_REGION:-} "*) : ;;
+        *) echo "note      : current region ${EGRESS_REGION:-auto} is outside the pool;"
+           echo "            the next rotation moves to ${np%% *}" ;;
+      esac
+    else
+      echo "pool cleared — rotations stay in ${EGRESS_REGION:-auto}"
+    fi ;;
   region)
     [ -n "${2:-}" ] || { echo "usage: vps-psiphon region <CC|auto>"; exit 1; }
     r="$2"; [ "$r" = auto ] && r=""
@@ -486,6 +576,7 @@ case "${1:-status}" in
     # to drop. Docker refuses if anything else still references it — that is fine.
     docker image rm "$IMAGE" >/dev/null 2>&1
     rm -f /usr/local/sbin/vps-psiphon-run /usr/local/sbin/vps-psiphon-watchdog \
+          /usr/local/sbin/vps-psiphon-advance-region \
           /etc/default/vps-psiphon /var/lib/vps-psiphon-watchdog.state \
           /var/log/vps-psiphon-watchdog.log /tmp/vpspsi.speed
     rm -rf /opt/vps-psiphon

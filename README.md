@@ -74,7 +74,7 @@ Requires root, docker and curl.
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--region CC` | auto | exit country, ISO 3166-1 alpha-2 |
+| `--region CC[,CC…]` | auto | exit country, ISO 3166-1 alpha-2. Several form a rotation pool |
 | `--device-region CC` | autodetected | region the client reports (cosmetic — the server decides by GeoIP) |
 | `--socks-port N` | 1080 | loopback SOCKS5 port for xray |
 | `--http-port N` | 8080 | loopback HTTP proxy port |
@@ -152,6 +152,7 @@ measured.
 vps-psiphon                 state: region, exit IP, Google's country verdict, traffic
 vps-psiphon rotate          fresh tunnel → different exit IP
 vps-psiphon region JP       change exit country
+vps-psiphon pool 'DE NL FR' countries to rotate through ('' clears it)
 vps-psiphon speed           50 MB single stream + 4 streams aggregate
 vps-psiphon logs [n]        Psiphon client log
 vps-psiphon watchdog [n]    watchdog journal
@@ -197,6 +198,33 @@ Threshold is 2 consecutive failures, cooldown between rotations 30 minutes
 Rotation is meaningful here because Psiphon exits live on heterogeneous third-party
 infrastructure — reconnecting changes both the address and the ASN.
 
+### Rotating through a pool of countries
+
+Psiphon takes **one** egress country, never a list, and rotating inside it retries
+that country's servers — the very set that is exhausted when the country is busy.
+Leaving the region empty (`auto`) does widen the choice, but it can answer from
+another continent, and the watchdog would only notice a check later.
+
+`REGION_POOL` closes that gap on this side: every rotation advances one step
+through the list, so the retry draws on a different country while the exit stays
+inside a set you chose.
+
+```
+bash psiphon_install.sh --region DE,NL,FR      # first entry is where it starts
+vps-psiphon pool 'DE NL FR AT'                 # or set it later
+vps-psiphon pool ''                            # back to a single fixed country
+```
+
+The pool doubles as the country check's allow-list — anything you list is accepted
+as a destination, so keep it to countries you actually want to be seen from and
+that are near enough not to cost you the latency. Empty (the default) leaves
+behaviour exactly as it was: rotations stay in `EGRESS_REGION`.
+
+The region is applied by rewriting `psiphon.config` in place. The image seeds that
+file only when it is absent, so the edit sticks — and the client keeps its cached
+server list, which `vps-psiphon region` discards along with the whole config
+directory.
+
 ### Why the country check is the one that matters
 
 Google keeps its own opinion about where an address is, and that opinion can disagree
@@ -239,6 +267,7 @@ is run as a command.
 |---|---|
 | `OK_REGIONS='DE NL JP'` | acceptable verdicts when no region is pinned; ignored while `EGRESS_REGION` is set |
 | `MIN_THROUGHPUT_KBPS=100` | throughput floor in KB/s, measured on the watchdog's own fetch; `0` disables the check |
+| `REGION_POOL='DE NL FR'` | countries each rotation advances through, and the country check's allow-list; empty pins rotations to `EGRESS_REGION` |
 | `HEALTH_CMD='curl -sf --socks5-hostname 127.0.0.1:$SOCKS_PORT -o /dev/null https://example.com/'` | extra probe; non-zero exit rotates. `$SOCKS_PORT` is exported for it |
 
 ## Measurements
