@@ -223,10 +223,11 @@ fi
 chown -R 1000:1000 "$CONF_DIR"
 
 # Preserve operator-set values across a reinstall.
-OLD_HEALTH_CMD=""; OLD_OK_REGIONS=""
+OLD_HEALTH_CMD=""; OLD_OK_REGIONS=""; OLD_MIN_THROUGHPUT=""
 if [ -r "$ENVF" ]; then
   OLD_HEALTH_CMD="$(sed -n 's/^HEALTH_CMD=//p' "$ENVF")"
   OLD_OK_REGIONS="$(sed -n 's/^OK_REGIONS=//p' "$ENVF")"
+  OLD_MIN_THROUGHPUT="$(sed -n 's/^MIN_THROUGHPUT_KBPS=//p' "$ENVF")"
 fi
 
 cat > "$ENVF" <<EOF
@@ -254,6 +255,11 @@ OK_REGIONS=$OLD_OK_REGIONS
 # Optional extra probe for what no unauthenticated check can see: whether the
 # service you actually care about accepts this exit. Non-zero exit = rotate.
 #   HEALTH_CMD='curl -sf --max-time 15 --socks5-hostname 127.0.0.1:$SOCKS_PORT -o /dev/null https://example.com/'
+# Minimum throughput, KB/s, measured on the watchdog's own YouTube fetch — no extra
+# traffic. Below this for FAIL_THRESHOLD consecutive checks, the tunnel is rotated:
+# Psiphon picks a server per tunnel, and a bad pick otherwise persists indefinitely
+# while liveness and country both read green. 0 disables the gate.
+MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-100}
 HEALTH_CMD=$OLD_HEALTH_CMD
 EOF
 chmod 600 "$ENVF"
@@ -295,7 +301,12 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #      we asked for. YouTube publishes that verdict in its page source as "GL":"XX".
 #      This is the failure that makes Cloudflare WARP unusable for region-gated
 #      services: WARP geolocates back to the client's real country, so they refuse.
-#   3. HEALTH_CMD    — anything further that only you can verify.
+#   3. slow tunnel   — the exit answers from the right country but carries almost
+#      nothing. Psiphon picks its server per tunnel, so a bad pick stays until
+#      something forces a reconnect, while liveness and country both stay green
+#      throughout — without this gate a 30-90x throughput collapse is invisible.
+#      Measured on the YouTube fetch below, so it costs no extra traffic.
+#   4. HEALTH_CMD    — anything further that only you can verify.
 #
 # Google's /sorry captcha is recorded but never rotates on its own: a human solves
 # one in seconds, and churning the tunnel over it costs more than it saves.
@@ -325,12 +336,18 @@ for attempt in 1 2; do
   [ "$attempt" = 1 ] && sleep 15
 done
 
-reason=""; gl=""
+reason=""; gl=""; kbps=""
 if [ "$alive" = 0 ]; then
   reason="socks-dead"
 else
-  gl="$(curl -s --max-time 25 "${S[@]}" -H 'Accept-Language: en-US' https://www.youtube.com/ 2>/dev/null \
-        | grep -oE '"GL":"[A-Z]{2}"' | head -1 | cut -d'"' -f4 || true)"
+  # One fetch serves two checks: the country verdict and how fast it arrived.
+  ytf="$(mktemp)"
+  spd="$(LC_ALL=C curl -s --max-time 25 "${S[@]}" -H 'Accept-Language: en-US' \
+         -o "$ytf" -w '%{speed_download}' https://www.youtube.com/ 2>/dev/null || echo 0)"
+  gl="$(grep -oE '"GL":"[A-Z]{2}"' "$ytf" 2>/dev/null | head -1 | cut -d'"' -f4)"
+  got="$(stat -c %s "$ytf" 2>/dev/null || echo 0)"
+  rm -f "$ytf"
+  kbps=$(( ${spd%%.*} / 1024 ))
   if [ -n "$gl" ]; then
     if [ -n "${EGRESS_REGION:-}" ] && [ "$gl" != "$EGRESS_REGION" ]; then
       reason="wrong-country (asked $EGRESS_REGION, Google sees $gl)"
@@ -339,6 +356,15 @@ else
         *" $gl "*) : ;;
         *) reason="wrong-country (Google sees $gl, not in '$OK_REGIONS')" ;;
       esac
+    fi
+  fi
+  # Throughput gate. A truncated fetch is itself the symptom, so a partial download
+  # still counts, but it needs enough bytes for the rate to mean anything. Rotating
+  # drops every live client connection, so this only fires through FAIL_THRESHOLD
+  # consecutive checks and the rotate cooldown.
+  if [ -z "$reason" ] && [ "${MIN_THROUGHPUT_KBPS:-0}" -gt 0 ] && [ "$got" -ge 50000 ]; then
+    if [ "$kbps" -lt "${MIN_THROUGHPUT_KBPS}" ]; then
+      reason="slow-tunnel (${kbps} KB/s < ${MIN_THROUGHPUT_KBPS} KB/s floor)"
     fi
   fi
   if [ -z "$reason" ] && [ -n "${HEALTH_CMD:-}" ]; then
@@ -362,6 +388,8 @@ else
   fails=$((fails + 1))
   log "check failed ($reason), consecutive=$fails"
 fi
+# Always record the rate: this is the history that makes a slow decline legible.
+[ -n "$kbps" ] && log "throughput ${kbps} KB/s (country ${gl:-?})"
 
 now=$(date +%s)
 if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] && [ $((now - last_rotate)) -ge "${ROTATE_COOLDOWN:-1800}" ]; then

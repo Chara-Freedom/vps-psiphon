@@ -174,12 +174,18 @@ vps-psiphon uninstall       remove everything, including this CLI
 
 ## The watchdog
 
-Three rotation triggers, in order of how certain they are:
+Four rotation triggers, in order of how certain they are:
 
 1. **tunnel dead** — SOCKS does not answer.
 2. **wrong country** — Google's own verdict about the exit does not match the region
    you asked for.
-3. **`HEALTH_CMD`** — an optional command of your own; a non-zero exit rotates.
+3. **slow tunnel** — the exit answers, from the right country, and carries almost
+   nothing. Psiphon picks its server once per tunnel, so a bad pick persists until
+   something forces a reconnect, and both checks above stay green the whole time.
+   The rate is measured on the country check's own fetch, so it costs no extra
+   traffic; below `MIN_THROUGHPUT_KBPS` counts as a failure. Every check logs its
+   rate, which is what makes a gradual decline visible at all.
+4. **`HEALTH_CMD`** — an optional command of your own; a non-zero exit rotates.
 
 Google's captcha wall (`302 → /sorry/index`) is shown in `status` and logged when it
 changes, but never rotates on its own: a human solves a captcha in seconds, and
@@ -232,6 +238,7 @@ is run as a command.
 | Setting | Effect |
 |---|---|
 | `OK_REGIONS='DE NL JP'` | acceptable verdicts when no region is pinned; ignored while `EGRESS_REGION` is set |
+| `MIN_THROUGHPUT_KBPS=100` | throughput floor in KB/s, measured on the watchdog's own fetch; `0` disables the check |
 | `HEALTH_CMD='curl -sf --socks5-hostname 127.0.0.1:$SOCKS_PORT -o /dev/null https://example.com/'` | extra probe; non-zero exit rotates. `$SOCKS_PORT` is exported for it |
 
 ## Measurements
