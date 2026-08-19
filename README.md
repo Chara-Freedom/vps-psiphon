@@ -82,6 +82,7 @@ Requires root, docker and curl.
 | `--socks-port N` | 1080 | SOCKS5 port for xray |
 | `--http-port N` | 8080 | HTTP proxy port |
 | `--no-http` | — | do not publish the HTTP proxy at all |
+| `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked in every mode. Empty disables it |
 | `--bind ADDR` | docker0 gateway | host address the ports are published on |
 | `--bind-loopback` | — | publish on `127.0.0.1` instead of the gateway |
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
@@ -210,18 +211,26 @@ vps-psiphon uninstall       remove everything, including this CLI
 
 ## The watchdog
 
-Four rotation triggers, in order of how certain they are:
+Five rotation triggers, in order of how certain they are:
 
 1. **tunnel dead** — SOCKS does not answer.
-2. **wrong country** — Google's own verdict about the exit does not match the region
+2. **denied country** — Google places the exit in a sanctioned or Google-blocked
+   region (`DENY_REGIONS`, default `RU BY IR SY CU KP CN VE`). This is the only
+   country check that runs in *every* mode: with no pinned region and no
+   `OK_REGIONS`, the allow-list below is empty by definition and judges nothing —
+   which is exactly when an exit in a sanctioned region would sit there unnoticed.
+   The two lists are not alternatives. The set of acceptable countries is closed and
+   short, so an allow-list handles a pinned region well; the set of dangerous ones is
+   open, which is why it is worth naming them separately and checking them always.
+3. **wrong country** — Google's own verdict about the exit does not match the region
    you asked for.
-3. **slow tunnel** — the exit answers, from the right country, and carries almost
+4. **slow tunnel** — the exit answers, from the right country, and carries almost
    nothing. Psiphon picks its server once per tunnel, so a bad pick persists until
    something forces a reconnect, and both checks above stay green the whole time.
    The rate is measured on the country check's own fetch, so it costs no extra
    traffic; below `MIN_THROUGHPUT_KBPS` counts as a failure. Every check logs its
    rate, which is what makes a gradual decline visible at all.
-4. **`HEALTH_CMD`** — an optional command of your own; a non-zero exit rotates.
+5. **`HEALTH_CMD`** — an optional command of your own; a non-zero exit rotates.
 
 Google's captcha wall (`302 → /sorry/index`) is shown in `status` and logged when it
 changes, but never rotates on its own: a human solves a captcha in seconds, and
@@ -303,6 +312,7 @@ is run as a command.
 | `OK_REGIONS='DE NL JP'` | acceptable verdicts when no region is pinned; ignored while `EGRESS_REGION` is set |
 | `MIN_THROUGHPUT_KBPS=100` | throughput floor in KB/s, measured on the watchdog's own fetch; `0` disables the check |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through, and the country check's allow-list; empty pins rotations to `EGRESS_REGION` |
+| `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first and in every mode, unlike the allow-lists above; empty disables it |
 | `HEALTH_CMD='curl -sf --socks5-hostname $BIND:$SOCKS_PORT -o /dev/null https://example.com/'` | extra probe; non-zero exit rotates. `$SOCKS_PORT` is exported for it |
 
 ## Measurements

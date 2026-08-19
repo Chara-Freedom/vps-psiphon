@@ -35,6 +35,14 @@ REGION_POOL=""; REGION_POOL_SET=0
 DEVICE_REGION="${DEVICE_REGION:-}"
 WATCHDOG=1
 PUBLISH_HTTP=1
+# Countries the exit must never sit in. Checked before any allow-list and in every
+# mode — including auto, where the allow-list is empty by definition and nothing
+# else looks at the country at all. RU/BY/IR/SY/CU/KP are sanctioned regions where
+# Google withholds services; CN is not sanctioned but blocks Google outright, so an
+# exit there is useless for the same reason. A false positive costs one rotation.
+DENY_REGIONS_DEFAULT="RU BY IR SY CU KP CN VE"
+DENY_REGIONS=""; DENY_REGIONS_SET=0
+
 CONF_DIR=/opt/vps-psiphon/config
 ENVF=/etc/default/vps-psiphon
 # Ports asked for explicitly are honoured or refused, never silently moved.
@@ -62,6 +70,11 @@ psiphon_install.sh [options]
                        consumes it, so a taken default is moved to the next free
                        port; a port you name explicitly is refused instead.
   --no-http            do not publish the HTTP proxy at all
+  --deny-regions 'CC…' countries the exit must never be in, space or comma
+                       separated. Default: RU BY IR SY CU KP CN VE. Unlike the
+                       region and the pool, this is checked in EVERY mode — with
+                       no --region and no OK_REGIONS it is the only country check
+                       there is. An empty string disables it.
   --bind ADDR          host address to publish the SOCKS5 on. Default: the
                        docker0 gateway (usually 172.17.0.1). Publishing there
                        lets the kernel DNAT the traffic; publishing on loopback
@@ -93,7 +106,11 @@ while [ $# -gt 0 ]; do
     --socks-port)    SOCKS_PORT="${2:?}"; SOCKS_PORT_SET=1; shift 2 ;;
     --http-port)     HTTP_PORT="${2:?}";  HTTP_PORT_SET=1;  shift 2 ;;
     --no-http)       PUBLISH_HTTP=0;         shift   ;;
+    --deny-regions)
+      DENY_REGIONS="$(printf '%s' "${2:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
+      DENY_REGIONS_SET=1; shift 2 ;;
     --bind)          BIND="${2:?}";          shift 2 ;;
+
     --bind-loopback) BIND=127.0.0.1;         shift   ;;
     --image)         IMAGE="${2:?}";         shift 2 ;;
     --no-watchdog)   WATCHDOG=0;             shift   ;;
@@ -286,6 +303,17 @@ chown -R 1000:1000 "$CONF_DIR"
 
 # Preserve operator-set values across a reinstall.
 OLD_HEALTH_CMD=""; OLD_OK_REGIONS=""; OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""
+# Tracked as set-or-not rather than by value: a deliberately emptied deny-list is a
+# real choice, and must not be undone by the default on the next reinstall.
+OLD_DENY_SET=0; OLD_DENY_REGIONS=""
+if [ -r "$ENVF" ] && grep -q '^DENY_REGIONS=' "$ENVF"; then
+  OLD_DENY_SET=1
+  OLD_DENY_REGIONS="$(sed -n 's/^DENY_REGIONS=//p' "$ENVF" | tr -d "'")"
+fi
+if [ "$DENY_REGIONS_SET" = 0 ]; then
+  if [ "$OLD_DENY_SET" = 1 ]; then DENY_REGIONS="$OLD_DENY_REGIONS"
+  else DENY_REGIONS="$DENY_REGIONS_DEFAULT"; fi
+fi
 if [ -r "$ENVF" ]; then
   OLD_HEALTH_CMD="$(sed -n 's/^HEALTH_CMD=//p' "$ENVF")"
   OLD_OK_REGIONS="$(sed -n 's/^OK_REGIONS=//p' "$ENVF")"
@@ -294,6 +322,16 @@ if [ -r "$ENVF" ]; then
   # An explicit --region wins; otherwise an existing pool survives the reinstall.
   [ "$REGION_POOL_SET" = 1 ] || REGION_POOL="$OLD_REGION_POOL"
 fi
+
+# Checked here rather than earlier: the pool is only known once it has been either
+# given on the command line or restored from the env file just above.
+# A country that is both requested and denied would rotate forever — every rotation
+# lands somewhere the deny-list rejects on the very next check.
+for r in ${EGRESS_REGION:-} ${REGION_POOL:-}; do
+  case " $DENY_REGIONS " in
+    *" $r "*) say "!! '$r' is both requested and denied — every exit there will be rejected" ;;
+  esac
+done
 
 # A reinstall that moved the published address without saying so would leave the
 # outbound dialing an address nobody listens on — a tunnel that reads healthy in
@@ -335,6 +373,12 @@ ROTATE_COOLDOWN=1800
 #   OK_REGIONS='DE NL JP'
 # Ignored while EGRESS_REGION is set — then the verdict must equal that region.
 OK_REGIONS=$OLD_OK_REGIONS
+# Countries the exit must NEVER be in, space separated. Checked before the allow-
+# list and in every mode: with no EGRESS_REGION and no OK_REGIONS this is the only
+# country check that runs at all. Sanctioned regions are where Google withholds
+# service, which is the failure this tool exists to escape — so a false positive
+# costs one rotation and a miss costs the service. Empty disables it.
+DENY_REGIONS='$DENY_REGIONS'
 # Optional extra probe for what no unauthenticated check can see: whether the
 # service you actually care about accepts this exit. Non-zero exit = rotate.
 #   HEALTH_CMD='curl -sf --max-time 15 --socks5-hostname $BIND:$SOCKS_PORT -o /dev/null https://example.com/'
@@ -425,17 +469,26 @@ chmod 0755 /usr/local/sbin/vps-psiphon-advance-region
 cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #!/usr/bin/env bash
 # Rotation triggers, in order of how certain they are:
-#   1. tunnel dead   — SOCKS does not answer.
-#   2. wrong country — Google's own verdict about this exit does not match the region
+#   1. tunnel dead    — SOCKS does not answer.
+#   2. denied country — Google places this exit in a sanctioned or Google-blocked
+#      region. Checked before everything below and in EVERY mode: under auto with no
+#      OK_REGIONS the allow-list judges nothing, which is precisely when a sanctioned
+#      exit would go unnoticed. Allow-list and deny-list are not alternatives — the
+#      set of acceptable countries is closed and short, the set of dangerous ones is
+#      open, so the second has to be named and checked unconditionally.
+#   3. wrong country  — Google's own verdict about this exit does not match the region
 #      we asked for. YouTube publishes that verdict in its page source as "GL":"XX".
 #      This is the failure that makes Cloudflare WARP unusable for region-gated
 #      services: WARP geolocates back to the client's real country, so they refuse.
-#   3. slow tunnel   — the exit answers from the right country but carries almost
+#      Not every mismatch weighs the same: Psiphon is used mostly from America, so
+#      Google has reclassified many of its exits as US — harmless in practice. It is
+#      a rewrite to a sanctioned region that breaks the service, hence trigger 2.
+#   4. slow tunnel    — the exit answers from the right country but carries almost
 #      nothing. Psiphon picks its server per tunnel, so a bad pick stays until
 #      something forces a reconnect, while liveness and country both stay green
 #      throughout — without this gate a 30-90x throughput collapse is invisible.
 #      Measured on the YouTube fetch below, so it costs no extra traffic.
-#   4. HEALTH_CMD    — anything further that only you can verify.
+#   5. HEALTH_CMD     — anything further that only you can verify.
 #
 # Google's /sorry captcha is recorded but never rotates on its own: a human solves
 # one in seconds, and churning the tunnel over it costs more than it saves.
@@ -478,21 +531,31 @@ else
   rm -f "$ytf"
   kbps=$(( ${spd%%.*} / 1024 ))
   if [ -n "$gl" ]; then
+    # The deny-list runs first, and it is the only one of these checks that runs in
+    # every mode. Under auto with no OK_REGIONS the allow-list below is empty by
+    # definition and judges nothing — which is precisely when an exit in a
+    # sanctioned region would otherwise go unnoticed for hours.
+    denied=0
+    case " ${DENY_REGIONS:-} " in
+      *" $gl "*) reason="denied-country (Google sees $gl — sanctioned or Google-blocked)"; denied=1 ;;
+    esac
     # With a pool, every country in it is a destination we accepted, so the
     # verdict is judged against the whole pool — otherwise the watchdog would
     # call its own last rotation a wrong-country failure and rotate forever.
-    if [ -n "${REGION_POOL:-}" ]; then
-      case " $REGION_POOL " in
-        *" $gl "*) : ;;
-        *) reason="wrong-country (Google sees $gl, not in pool '$REGION_POOL')" ;;
-      esac
-    elif [ -n "${EGRESS_REGION:-}" ] && [ "$gl" != "$EGRESS_REGION" ]; then
-      reason="wrong-country (asked $EGRESS_REGION, Google sees $gl)"
-    elif [ -z "${EGRESS_REGION:-}" ] && [ -n "${OK_REGIONS:-}" ]; then
-      case " $OK_REGIONS " in
-        *" $gl "*) : ;;
-        *) reason="wrong-country (Google sees $gl, not in '$OK_REGIONS')" ;;
-      esac
+    if [ "$denied" = 0 ]; then
+      if [ -n "${REGION_POOL:-}" ]; then
+        case " $REGION_POOL " in
+          *" $gl "*) : ;;
+          *) reason="wrong-country (Google sees $gl, not in pool '$REGION_POOL')" ;;
+        esac
+      elif [ -n "${EGRESS_REGION:-}" ] && [ "$gl" != "$EGRESS_REGION" ]; then
+        reason="wrong-country (asked $EGRESS_REGION, Google sees $gl)"
+      elif [ -z "${EGRESS_REGION:-}" ] && [ -n "${OK_REGIONS:-}" ]; then
+        case " $OK_REGIONS " in
+          *" $gl "*) : ;;
+          *) reason="wrong-country (Google sees $gl, not in '$OK_REGIONS')" ;;
+        esac
+      fi
     fi
   fi
   # Throughput gate. A truncated fetch is itself the symptom, so a partial download
@@ -570,6 +633,7 @@ status() {
   echo "watchdog  : $(systemctl is-active vps-psiphon-watchdog.timer) / $(systemctl is-enabled vps-psiphon-watchdog.timer 2>/dev/null)"
   echo "socks     : ${BIND}:${SOCKS_PORT}   (region requested: ${EGRESS_REGION:-auto})"
   [ -n "${REGION_POOL:-}" ] && echo "pool      : ${REGION_POOL}   (each rotation advances one step)"
+  [ -n "${DENY_REGIONS:-}" ] && echo "deny      : ${DENY_REGIONS}   (rejected in every mode, checked first)"
   if [ "$PUBLISH_HTTP" = 1 ]; then
     echo "http      : ${BIND}:${HTTP_PORT}   (unused by xray; handy for curl -x)"
   else
