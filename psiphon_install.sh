@@ -3,9 +3,9 @@
 #
 #   bash <(curl -fsSL https://raw.githubusercontent.com/Chara-Freedom/vps-psiphon/main/psiphon_install.sh)
 #
-# The tunnel runs as a container; its SOCKS5 is bound to loopback and handed to
-# xray through a four-line outbound. systemd owns the lifecycle, and a watchdog
-# rotates the tunnel when the exit address stops being usable.
+# The tunnel runs as a container; its SOCKS5 is published on a host-private
+# address and handed to xray through a four-line outbound. systemd owns the
+# lifecycle, and a watchdog rotates the tunnel when the exit stops being usable.
 #
 # Installs:
 #   /etc/default/vps-psiphon              parameters
@@ -24,7 +24,10 @@ set -euo pipefail
 
 IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
 NAME="${NAME:-vps-psiphon}"
-BIND="${BIND:-127.0.0.1}"
+# Resolved after preflight, because the default is an address that does not exist
+# until docker is running. Empty here means "not chosen yet".
+BIND="${BIND:-}"
+
 SOCKS_PORT="${SOCKS_PORT:-1080}"
 HTTP_PORT="${HTTP_PORT:-8080}"
 EGRESS_REGION="${EGRESS_REGION:-}"
@@ -52,13 +55,25 @@ psiphon_install.sh [options]
                        IT JP NL NO PL RS SE SG US
   --device-region CC   region the client reports. Cosmetic — the server decides
                        by GeoIP. Default: autodetected from this host.
-  --socks-port N       loopback SOCKS5 port for xray, default 1080. Refused if
+  --socks-port N       SOCKS5 port for xray, default 1080. Refused if
                        taken — xray's outbound names this port, so moving it
                        behind your back would leave a tunnel nothing routes to.
-  --http-port N        loopback HTTP proxy port, default 8080. Nothing here
+  --http-port N        HTTP proxy port, default 8080. Nothing here
                        consumes it, so a taken default is moved to the next free
                        port; a port you name explicitly is refused instead.
   --no-http            do not publish the HTTP proxy at all
+  --bind ADDR          host address to publish the SOCKS5 on. Default: the
+                       docker0 gateway (usually 172.17.0.1). Publishing there
+                       lets the kernel DNAT the traffic; publishing on loopback
+                       cannot, so every byte is copied through docker-proxy in
+                       userspace instead — 0.10 of a core sustained on a node
+                       carrying ~100 new connections/s, 0.27-0.36 at peak. On a
+                       1-core box that copy is the difference that matters.
+  --bind-loopback      publish on 127.0.0.1 instead. Narrower — only processes
+                       on the host reach it, whereas the gateway is also
+                       reachable by containers on the default bridge — at the
+                       price of that userspace copy. Neither address is
+                       reachable from the internet.
   --image REF          container image, default swarupsengupta2007/psiphon:latest
   --no-watchdog        skip the watchdog
 U
@@ -78,6 +93,8 @@ while [ $# -gt 0 ]; do
     --socks-port)    SOCKS_PORT="${2:?}"; SOCKS_PORT_SET=1; shift 2 ;;
     --http-port)     HTTP_PORT="${2:?}";  HTTP_PORT_SET=1;  shift 2 ;;
     --no-http)       PUBLISH_HTTP=0;         shift   ;;
+    --bind)          BIND="${2:?}";          shift 2 ;;
+    --bind-loopback) BIND=127.0.0.1;         shift   ;;
     --image)         IMAGE="${2:?}";         shift 2 ;;
     --no-watchdog)   WATCHDOG=0;             shift   ;;
     -h|--help)       usage; exit 0 ;;
@@ -93,6 +110,36 @@ die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 command -v docker >/dev/null || die "docker is not installed"
 docker info >/dev/null 2>&1 || die "docker daemon is not running"
 command -v curl >/dev/null || die "curl is not installed"
+
+# ------------------------------------------------------------- bind address --
+# Where the SOCKS5 is published decides whether the kernel can carry it. Docker
+# writes a DNAT rule for every published port, but a loopback destination needs
+# net.ipv4.conf.all.route_localnet, which docker does not set — so that rule sits
+# at zero packets and docker-proxy copies every byte through userspace instead.
+# Measured on a live node: 0.10 of a core sustained, 0.27-0.36 at peak, and
+# exactly 0.00 once the same traffic is published on the gateway address, with
+# throughput unchanged.
+#
+# The gateway is host-private either way — RFC1918, no route from outside — so
+# what this actually trades is reachability from other containers on the default
+# bridge, which loopback does not grant and the gateway does.
+# Both lookups end in `|| true`: this script runs under `set -e` with pipefail,
+# where a missing `ip` binary makes the assignment itself the failing command and
+# kills the install before it reaches the fallback it has.
+docker_gateway() {
+  local g=""
+  g="$(ip -4 -o addr show docker0 2>/dev/null \
+       | awk '{print $4}' | cut -d/ -f1 | head -1 || true)"
+  [ -n "$g" ] || g="$(docker network inspect bridge \
+                      -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)"
+  printf '%s' "$g"
+}
+if [ -z "$BIND" ]; then
+  BIND="$(docker_gateway)"
+  # No docker0 — a custom bridge, or docker configured without one. Loopback
+  # still works, docker-proxy and all.
+  [ -n "$BIND" ] || BIND=127.0.0.1
+fi
 
 # --------------------------------------------------------- port arbitration --
 # Docker allocates host ports when the container starts, which is long after this
@@ -191,17 +238,19 @@ if [ "$PUBLISH_HTTP" = 1 ]; then
   fi
 fi
 
-# xray must live in the host network namespace, otherwise 127.0.0.1 in the
-# outbound points at the xray container itself instead of at this tunnel.
+# Loopback exists separately inside every namespace, so 127.0.0.1 in the outbound
+# means "this container" unless xray runs on host networking. The docker0 gateway
+# has no such ambiguity — the host and every bridged container reach the same
+# address — which is the second reason it is the default.
 XRAY_CT="$(docker ps --format '{{.Names}}' | grep -iE 'remnanode|xray' | head -1 || true)"
-if [ -n "$XRAY_CT" ]; then
+if [ -n "$XRAY_CT" ] && [ "$BIND" = "127.0.0.1" ]; then
   NETMODE="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$XRAY_CT" 2>/dev/null || echo '?')"
   if [ "$NETMODE" != "host" ]; then
     echo
     echo "  !! container '$XRAY_CT' runs with NetworkMode=$NETMODE, not host."
     echo "     127.0.0.1:$SOCKS_PORT will NOT be reachable from xray."
-    echo "     Either give it host networking, or reinstall with BIND=172.17.0.1"
-    echo "     and use that address in the outbound."
+    echo "     Drop --bind-loopback: the default gateway address is reachable"
+    echo "     from both, and needs no change to that container."
     echo
   fi
 fi
@@ -246,6 +295,24 @@ if [ -r "$ENVF" ]; then
   [ "$REGION_POOL_SET" = 1 ] || REGION_POOL="$OLD_REGION_POOL"
 fi
 
+# A reinstall that moved the published address without saying so would leave the
+# outbound dialing an address nobody listens on — a tunnel that reads healthy in
+# every check and carries nothing. The installer cannot repair that itself: the
+# outbound lives in the panel, out of its reach. So it says so here, and again
+# beside the new outbound at the end, where it cannot be scrolled past.
+OLD_BIND=""
+[ -r "$ENVF" ] && OLD_BIND="$(sed -n 's/^BIND=//p' "$ENVF")"
+BIND_CHANGED=0
+if [ -n "$OLD_BIND" ] && [ "$OLD_BIND" != "$BIND" ]; then
+  BIND_CHANGED=1
+  echo
+  printf '\033[1;33m  !! published address changes: %s -> %s\033[0m\n' "$OLD_BIND" "$BIND"
+  echo "     xray still dials $OLD_BIND, and will carry nothing until you change it."
+  echo "     Update the outbound printed at the end of this run."
+  echo "     To stay where you are instead: re-run with --bind $OLD_BIND"
+  echo
+fi
+
 cat > "$ENVF" <<EOF
 # vps-psiphon — written by psiphon_install.sh
 IMAGE=$IMAGE
@@ -270,7 +337,7 @@ ROTATE_COOLDOWN=1800
 OK_REGIONS=$OLD_OK_REGIONS
 # Optional extra probe for what no unauthenticated check can see: whether the
 # service you actually care about accepts this exit. Non-zero exit = rotate.
-#   HEALTH_CMD='curl -sf --max-time 15 --socks5-hostname 127.0.0.1:$SOCKS_PORT -o /dev/null https://example.com/'
+#   HEALTH_CMD='curl -sf --max-time 15 --socks5-hostname $BIND:$SOCKS_PORT -o /dev/null https://example.com/'
 # Minimum throughput, KB/s, measured on the watchdog's own YouTube fetch — no extra
 # traffic. Below this for FAIL_THRESHOLD consecutive checks, the tunnel is rotated:
 # Psiphon picks a server per tunnel, and a bad pick otherwise persists indefinitely
@@ -301,6 +368,8 @@ set -euo pipefail
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 # NOTE: the BIND prefix is load-bearing. Publishing without it exposes an OPEN
 # SOCKS5 PROXY to the internet — psiphon binds 0.0.0.0 inside the container.
+# Both supported values are host-private (loopback, or the docker0 gateway); what
+# BIND must never become is a wildcard or a public address.
 PUB=( -p "${BIND}:${SOCKS_PORT}:${SOCKS_PORT}" )
 # Default to publishing it, so env files written before this was an option keep
 # their old behaviour instead of silently losing the HTTP proxy.
@@ -378,7 +447,7 @@ set -uo pipefail
 . /etc/default/vps-psiphon
 LOG=/var/log/vps-psiphon-watchdog.log
 STATE=/var/lib/vps-psiphon-watchdog.state
-S=(--socks5-hostname "127.0.0.1:${SOCKS_PORT}")
+S=(--socks5-hostname "${BIND:-127.0.0.1}:${SOCKS_PORT}")
 touch "$LOG" 2>/dev/null
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
@@ -491,16 +560,18 @@ SOCKS_PORT="${SOCKS_PORT:-1080}"
 HTTP_PORT="${HTTP_PORT:-8080}"
 PUBLISH_HTTP="${PUBLISH_HTTP:-1}"
 CONF_DIR="${CONF_DIR:-/opt/vps-psiphon/config}"
-S=(--socks5-hostname "127.0.0.1:${SOCKS_PORT}")
+# Env files written before --bind existed carry no BIND line at all.
+BIND="${BIND:-127.0.0.1}"
+S=(--socks5-hostname "${BIND}:${SOCKS_PORT}")
 
 status() {
   echo "container : $(docker ps --filter "name=^${NAME}$" --format '{{.Status}}' || echo 'DOWN')"
   echo "service   : $(systemctl is-active vps-psiphon.service) / $(systemctl is-enabled vps-psiphon.service 2>/dev/null)"
   echo "watchdog  : $(systemctl is-active vps-psiphon-watchdog.timer) / $(systemctl is-enabled vps-psiphon-watchdog.timer 2>/dev/null)"
-  echo "socks     : 127.0.0.1:${SOCKS_PORT}   (region requested: ${EGRESS_REGION:-auto})"
+  echo "socks     : ${BIND}:${SOCKS_PORT}   (region requested: ${EGRESS_REGION:-auto})"
   [ -n "${REGION_POOL:-}" ] && echo "pool      : ${REGION_POOL}   (each rotation advances one step)"
   if [ "$PUBLISH_HTTP" = 1 ]; then
-    echo "http      : 127.0.0.1:${HTTP_PORT}   (unused by xray; handy for curl -x)"
+    echo "http      : ${BIND}:${HTTP_PORT}   (unused by xray; handy for curl -x)"
   else
     echo "http      : not published"
   fi
@@ -609,7 +680,7 @@ chmod 755 /usr/local/sbin/vps-psiphon
 # ---- units ------------------------------------------------------------------
 cat > /etc/systemd/system/vps-psiphon.service <<'U1'
 [Unit]
-Description=vps-psiphon egress tunnel (loopback SOCKS5 for xray)
+Description=vps-psiphon egress tunnel (host-private SOCKS5 for xray)
 After=docker.service network-online.target
 Requires=docker.service
 
@@ -693,6 +764,10 @@ echo
 say "xray outbound:"
 cat <<OUT
     { "tag": "psiphon-out", "protocol": "socks",
-      "settings": { "address": "127.0.0.1", "port": $SOCKS_PORT } }
+      "settings": { "address": "$BIND", "port": $SOCKS_PORT } }
 OUT
+if [ "${BIND_CHANGED:-0}" = 1 ]; then
+  printf '\033[1;33m    !! this run MOVED the address (%s -> %s), so the outbound above is\n' "$OLD_BIND" "$BIND"
+  printf '       NOT what your panel has. Update it now, or the tunnel carries nothing.\033[0m\n'
+fi
 say "manage with:  vps-psiphon {status|rotate|region <CC>|pool '<CC CC …>'|speed|logs|uninstall}"

@@ -4,8 +4,8 @@
 
 Psiphon as an egress point for an xray/remnawave node.
 
-The script runs the Psiphon client in a container, binds its SOCKS5 to loopback
-and hands it to xray under systemd supervision. A separate watchdog tracks not
+The script runs the Psiphon client in a container, publishes its SOCKS5 on a
+host-private address and hands it to xray under systemd supervision. A separate watchdog tracks not
 just whether the tunnel is alive, but whether the exit address is still usable —
 and reconnects to a different one when it stops being usable.
 
@@ -13,7 +13,7 @@ The xray outbound is five lines. The node does everything else.
 
 Companion project: **[vps-warp](https://github.com/tagashi666/vps-warp)** — the
 same idea over Cloudflare WARP. The two coexist without conflict: WARP works at
-kernel level through `fwmark`, vps-psiphon through a loopback SOCKS, so xray can
+kernel level through `fwmark`, vps-psiphon through a local SOCKS, so xray can
 hold both outbounds at once and split traffic by rules.
 
 > ⚠️ **Do not install this on a server inside the country you are circumventing.**
@@ -31,7 +31,10 @@ hold both outbounds at once and split traffic by rules.
 > independent of anything you send. After that, strangers' traffic leaves through
 > your tunnel, on your bandwidth, and any egress filtering you run by port number
 > does not see it: whatever they do is encapsulated inside the tunnel's own
-> connection. This script publishes on `127.0.0.1` for that reason.
+> connection. This script never publishes on a wildcard for that reason. It binds
+> either the docker0 gateway (the default) or `127.0.0.1` — both host-private, and
+> neither routable from outside. Which of the two, and why it matters, is under
+> [Where the SOCKS5 is published](#where-the-socks5-is-published).
 >
 > If you use the image by hand regardless, the published ports are what you have to
 > change — both of them, in the compose file the image ships with:
@@ -76,9 +79,11 @@ Requires root, docker and curl.
 |---|---|---|
 | `--region CC[,CC…]` | auto | exit country, ISO 3166-1 alpha-2. Several form a rotation pool |
 | `--device-region CC` | autodetected | region the client reports (cosmetic — the server decides by GeoIP) |
-| `--socks-port N` | 1080 | loopback SOCKS5 port for xray |
-| `--http-port N` | 8080 | loopback HTTP proxy port |
+| `--socks-port N` | 1080 | SOCKS5 port for xray |
+| `--http-port N` | 8080 | HTTP proxy port |
 | `--no-http` | — | do not publish the HTTP proxy at all |
+| `--bind ADDR` | docker0 gateway | host address the ports are published on |
+| `--bind-loopback` | — | publish on `127.0.0.1` instead of the gateway |
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
 | `--no-watchdog` | — | skip the watchdog |
 
@@ -120,14 +125,44 @@ about three seconds from launch, rather than two minutes of nothing.
   "tag": "psiphon-out",
   "protocol": "socks",
   "settings": {
-    "address": "127.0.0.1",
+    "address": "172.17.0.1",
     "port": 1080
   }
 }
 ```
 
+The installer prints this block with the address it actually resolved — copy that
+one, not the sample, since the default is read from the host.
+
 Routing rules are yours to decide. One constraint: **do not send UDP here** — the
 Psiphon local proxy does not support it (see Measurements).
+
+### Where the SOCKS5 is published
+
+Two addresses are supported, and the difference is measurable rather than stylistic:
+
+| | reachable by | carried by |
+|---|---|---|
+| docker0 gateway — default, usually `172.17.0.1` | the host, and containers on the default bridge | the kernel |
+| `127.0.0.1` — `--bind-loopback` | processes on the host only | `docker-proxy`, in userspace |
+
+Docker writes a DNAT rule for every published port, but a loopback destination
+needs `net.ipv4.conf.all.route_localnet`, which docker does not set. On loopback
+that rule therefore never fires — its packet counter sits at zero — and
+`docker-proxy` copies every byte between two sockets in userspace instead. On a
+node carrying ~100 new connections per second that copy measured 0.10 of a core
+sustained and 0.27-0.36 at peak; the same traffic published on the gateway took it
+to exactly 0.00, with throughput unchanged. Bulk transfers hide this — the cost is
+in connection setup, so the busier the node, the worse loopback looks.
+
+Neither address is reachable from the internet. What the gateway costs is that
+other containers on the default bridge reach the tunnel too, which is what
+`--bind-loopback` is for when that matters more than the core does.
+
+Moving this on an existing install takes two edits and needs both: re-run the
+installer with the new setting, and change the address in the outbound. The
+installer cannot do the second — the outbound lives in your panel — so it warns
+loudly and reprints the outbound whenever the address moves.
 
 Older guides wrap this in a `"servers": [ … ]` array. Xray still parses that form —
 `infra/conf/socks.go` keeps both — but it is V2Ray legacy, no longer in the Xray
@@ -268,7 +303,7 @@ is run as a command.
 | `OK_REGIONS='DE NL JP'` | acceptable verdicts when no region is pinned; ignored while `EGRESS_REGION` is set |
 | `MIN_THROUGHPUT_KBPS=100` | throughput floor in KB/s, measured on the watchdog's own fetch; `0` disables the check |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through, and the country check's allow-list; empty pins rotations to `EGRESS_REGION` |
-| `HEALTH_CMD='curl -sf --socks5-hostname 127.0.0.1:$SOCKS_PORT -o /dev/null https://example.com/'` | extra probe; non-zero exit rotates. `$SOCKS_PORT` is exported for it |
+| `HEALTH_CMD='curl -sf --socks5-hostname $BIND:$SOCKS_PORT -o /dev/null https://example.com/'` | extra probe; non-zero exit rotates. `$SOCKS_PORT` is exported for it |
 
 ## Measurements
 
@@ -297,24 +332,29 @@ aggregate differed fourfold between two German exits.
 ## Pitfalls
 
 - **The `BIND` prefix on the published ports is load-bearing.** Inside the
-  container psiphon listens on `0.0.0.0`, so `-p 1080:1080` without `127.0.0.1:`
-  publishes an open SOCKS proxy to the internet. The script handles this; keep it
-  in mind if you edit by hand.
+  container psiphon listens on `0.0.0.0`, so `-p 1080:1080` with no address prefix
+  publishes an open SOCKS proxy to the internet. The script always supplies one —
+  the docker0 gateway or `127.0.0.1`, both host-private — and never a wildcard;
+  keep it in mind if you edit by hand.
 - **A host firewall does not contain a published container port.** Docker's publish
   is a DNAT rule in `nat/PREROUTING`, which runs before the filter rules ufw
   manages, so `ufw deny 1080` on an exposed port changes nothing and "the firewall
   is up" is not evidence the port is closed. Check what is actually listening —
-  `ss -tlnp | grep 1080` should show `127.0.0.1`, never `0.0.0.0` or `[::]`. If you
+  `ss -tlnp | grep 1080` should show your `BIND` address, never `0.0.0.0` or `[::]`. If you
   must leave a port published wider, filter it in the `DOCKER-USER` chain, which
   docker consults first.
 - **Changing the region requires clearing `/opt/vps-psiphon/config`.** The image
   seeds the config on first run only; after that `EGRESS_REGION` from the
   environment is silently ignored and you stay in the old country without being
   told. `vps-psiphon region` and a re-install both handle this.
-- **`127.0.0.1` requires the xray container to use host networking.** Otherwise
-  that address points at the xray container itself. The script checks and warns;
-  the workaround is to install with `BIND=172.17.0.1` and use that address in the
-  outbound.
+- **`--bind-loopback` requires the xray container to use host networking.**
+  Loopback exists separately inside every namespace, so from a bridged container
+  `127.0.0.1` names that container, not the tunnel. The default gateway address
+  carries no such ambiguity and needs nothing changed about xray. The script checks
+  and warns.
+- **Moving the published address is two edits, not one.** The installer rewrites
+  its own files; the outbound lives in your panel, out of its reach. Until both are
+  done the tunnel is up, every check reads green, and it carries nothing.
 - **`TargetServerEntry`** in the Psiphon config pins one specific server, but it
   collapses the pool to size 1 with no failover and removes the ability to move
   off an unusable exit. Only the region is pinned here.
