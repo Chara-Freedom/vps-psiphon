@@ -218,6 +218,22 @@ free_port() {
   return 1
 }
 
+# Ports settled on an earlier run have to survive a reinstall, or they drift. The
+# HTTP port is the visible case: 8080 is taken, the installer moves to 8081, and on
+# the next run it starts from the 8080 default again, finds 8081 held by our own
+# still-running container, and lands on 8082 — one higher every time. SOCKS_PORT is
+# the dangerous case rather than the untidy one: it is the port the panel's outbound
+# names, so silently resetting it to the default would point the outbound at nothing.
+# An explicit --socks-port/--http-port still wins over the stored value.
+if [ -r "$ENVF" ]; then
+  if [ "$SOCKS_PORT_SET" = 0 ]; then
+    V="$(sed -n 's/^SOCKS_PORT=//p' "$ENVF" | head -1)"; [ -n "$V" ] && SOCKS_PORT="$V"
+  fi
+  if [ "$HTTP_PORT_SET" = 0 ]; then
+    V="$(sed -n 's/^HTTP_PORT=//p' "$ENVF" | head -1)"; [ -n "$V" ] && HTTP_PORT="$V"
+  fi
+fi
+
 # Re-running over an existing install must work. The listener on our port is
 # docker-proxy, never a process called "$NAME", so ask docker who owns it.
 SOCKS_HOLDER="$(port_conflict "$SOCKS_PORT" "$BIND" || true)"
