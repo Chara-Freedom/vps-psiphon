@@ -609,7 +609,7 @@ else
   # apart by whether an HTTP transaction completed at all, not by how big it was.
   probe="$(LC_ALL=C curl -s --max-time 25 "${S[@]}" -H 'Accept-Language: en-US' \
            -o "$ytf" -w '%{speed_download} %{http_code}' https://www.youtube.com/ 2>/dev/null || echo '0 000')"
-  spd="${probe%% *}"; code="${probe##* }"
+  spd="${probe%% *}"; ytcode="${probe##* }"
   gl="$(grep -oE '"GL":"[A-Z]{2}"' "$ytf" 2>/dev/null | head -1 | cut -d'"' -f4)"
   got="$(stat -c %s "$ytf" 2>/dev/null || echo 0)"
   rm -f "$ytf"
@@ -659,7 +659,10 @@ else
   # straight through it and was logged as "0 KB/s" with no verdict. Judged strictly by
   # the ABSENCE of a response, never by a small one: Google's captcha is a small
   # response, and rotating on a captcha is deliberately not wanted.
-  if [ -z "$reason" ] && [ "$code" = "000" ]; then
+  # Named apart from the liveness probe's own `code` on purpose: the two live in the
+  # same function and mean different things, and reusing the name would make the next
+  # edit that reorders them fail silently.
+  if [ -z "$reason" ] && [ "$ytcode" = "000" ]; then
     reason="stalled-tunnel (no HTTP response in 25s while SOCKS answered)"
   fi
   if [ -z "$reason" ] && [ "${MIN_THROUGHPUT_KBPS:-0}" -gt 0 ] && [ "$got" -ge 50000 ]; then
