@@ -335,6 +335,7 @@ chown -R 1000:1000 "$CONF_DIR"
 
 # Preserve operator-set values across a reinstall.
 OLD_HEALTH_CMD=""; OLD_OK_REGIONS=""; OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""
+OLD_FAIL_WINDOW=""; OLD_GRACE=""
 # Tracked as set-or-not rather than by value: a deliberately emptied deny-list is a
 # real choice, and must not be undone by the default on the next reinstall.
 OLD_DENY_SET=0; OLD_DENY_REGIONS=""
@@ -350,6 +351,8 @@ if [ -r "$ENVF" ]; then
   OLD_HEALTH_CMD="$(sed -n 's/^HEALTH_CMD=//p' "$ENVF")"
   OLD_OK_REGIONS="$(sed -n 's/^OK_REGIONS=//p' "$ENVF")"
   OLD_MIN_THROUGHPUT="$(sed -n 's/^MIN_THROUGHPUT_KBPS=//p' "$ENVF")"
+  OLD_FAIL_WINDOW="$(sed -n 's/^FAIL_WINDOW=//p' "$ENVF")"
+  OLD_GRACE="$(sed -n 's/^THROUGHPUT_GRACE_SEC=//p' "$ENVF")"
   OLD_REGION_POOL="$(sed -n 's/^REGION_POOL=//p' "$ENVF" | tr -d "'")"
   # An explicit --region wins; otherwise an existing pool survives the reinstall.
   [ "$REGION_POOL_SET" = 1 ] || REGION_POOL="$OLD_REGION_POOL"
@@ -394,8 +397,14 @@ PUBLISH_HTTP=$PUBLISH_HTTP
 EGRESS_REGION=$EGRESS_REGION
 DEVICE_REGION=$DEVICE_REGION
 CONF_DIR=$CONF_DIR
-# watchdog tuning
+# watchdog tuning. FAIL_THRESHOLD failures within the last FAIL_WINDOW checks
+# rotate the tunnel — a window, not a run of consecutive failures. A tunnel that is
+# merely degraded does not fail every check: it alternates around the floor, and a
+# counter that resets on the first passing check never reaches the threshold. Seen
+# on a live node — four failures inside 70 minutes and no rotation, because a
+# passing check sat between every pair of them.
 FAIL_THRESHOLD=2
+FAIL_WINDOW=${OLD_FAIL_WINDOW:-5}
 ROTATE_COOLDOWN=1800
 #
 # NOTE: this file is sourced by the shell, so any value containing spaces MUST be
@@ -415,10 +424,33 @@ DENY_REGIONS='$DENY_REGIONS'
 # service you actually care about accepts this exit. Non-zero exit = rotate.
 #   HEALTH_CMD='curl -sf --max-time 15 --socks5-hostname $BIND:$SOCKS_PORT -o /dev/null https://example.com/'
 # Minimum throughput, KB/s, measured on the watchdog's own YouTube fetch — no extra
-# traffic. Below this for FAIL_THRESHOLD consecutive checks, the tunnel is rotated:
-# Psiphon picks a server per tunnel, and a bad pick otherwise persists indefinitely
-# while liveness and country both read green. 0 disables the gate.
-MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-100}
+# traffic. Below this on FAIL_THRESHOLD of the last FAIL_WINDOW checks, the tunnel is
+# rotated: Psiphon picks a server per tunnel, and a bad pick otherwise persists
+# indefinitely while liveness and country both read green. 0 disables the gate.
+#
+# One floor for every node, on purpose. A number fitted by hand to each machine is a
+# number nobody can reason about six months later, and this installer ships exactly
+# one of them. It belongs where the SLOWEST node still clears it comfortably, and the
+# way to find it is to replay each node's own logged history through the window rule
+# above and count the rotations it would have caused. Three nodes, ~40 hours each,
+# medians 1765 / 1987 / 3079 KB/s: at 800 the replay fires on none of them, at 1000 it
+# fires twice on the slowest, at 1200 five times. Raising it buys nothing either — a
+# real collapse (66-128 KB/s, measured while a healthy tunnel on the same box read
+# 1500) is caught on the second check at 600, at 800 and at 1000 alike. So 800: about
+# 45% of the slowest node's median, and far enough under every node's normal band to
+# stay silent while it is healthy. What made the old default of 100 useless was not
+# its precision but its distance from reality — a working tunnel reads in the
+# thousands, so a fifteen-fold collapse stayed below every alarm for over an hour.
+#
+# Change it for a node that genuinely cannot reach it — and replay `grep throughput`
+# from that node's watchdog log before concluding that it cannot.
+MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-800}
+# Seconds after the container starts during which the throughput gate is skipped. A
+# freshly dialled tunnel is still ramping while every client the restart cut loose
+# reconnects at once: the first check after a rotation read 73 KB/s on a tunnel that
+# settled at 1500 a few minutes later. Judging that reading would rotate a healthy
+# tunnel away and start the same race again. Liveness and country are still checked.
+THROUGHPUT_GRACE_SEC=${OLD_GRACE:-300}
 # Countries to rotate through, space separated. Empty = stay in EGRESS_REGION and
 # only change server within it. A pool is what you want when one country is busy:
 # each rotation advances to the next entry, so the retry draws on a different
@@ -522,7 +554,12 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #      nothing. Psiphon picks its server per tunnel, so a bad pick stays until
 #      something forces a reconnect, while liveness and country both stay green
 #      throughout — without this gate a 30-90x throughput collapse is invisible.
-#      Measured on the YouTube fetch below, so it costs no extra traffic.
+#      Measured on the YouTube fetch below, so it costs no extra traffic. Two things
+#      decide whether the gate ever fires: a floor set as a fraction of what this
+#      node gets rather than just above zero, and counting failures over a window,
+#      because a degraded tunnel alternates across the floor instead of staying
+#      under it. The gate is skipped for THROUGHPUT_GRACE_SEC after a start, while
+#      the tunnel is still ramping.
 #   5. HEALTH_CMD     — anything further that only you can verify.
 #
 # Google's /sorry captcha is recorded but never rotates on its own: a human solves
@@ -539,7 +576,7 @@ S=(--socks5-hostname "${BIND:-127.0.0.1}:${SOCKS_PORT}")
 touch "$LOG" 2>/dev/null
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
-fails=0; last_rotate=0; captcha=0
+fails=0; last_rotate=0; captcha=0; window=""
 [ -r "$STATE" ] && . "$STATE"
 export SOCKS_PORT          # so HEALTH_CMD can reach the proxy
 
@@ -597,9 +634,20 @@ else
   # still counts, but it needs enough bytes for the rate to mean anything. Rotating
   # drops every live client connection, so this only fires through FAIL_THRESHOLD
   # consecutive checks and the rotate cooldown.
+  # Age of the tunnel, so a rate measured while it is still ramping is recorded but
+  # not judged. An unknown age (no docker, renamed container) reads as old rather
+  # than young: the gate is what protects the service, and disabling it on a failed
+  # lookup would be the worse of the two mistakes.
+  up_for=999999
+  started="$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-vps-psiphon}" 2>/dev/null)"
+  [ -n "$started" ] && up_for=$(( $(date +%s) - $(date -d "$started" +%s 2>/dev/null || echo 0) ))
   if [ -z "$reason" ] && [ "${MIN_THROUGHPUT_KBPS:-0}" -gt 0 ] && [ "$got" -ge 50000 ]; then
     if [ "$kbps" -lt "${MIN_THROUGHPUT_KBPS}" ]; then
-      reason="slow-tunnel (${kbps} KB/s < ${MIN_THROUGHPUT_KBPS} KB/s floor)"
+      if [ "$up_for" -lt "${THROUGHPUT_GRACE_SEC:-300}" ]; then
+        log "slow (${kbps} KB/s) but the tunnel is ${up_for}s old — still ramping, not judged"
+      else
+        reason="slow-tunnel (${kbps} KB/s < ${MIN_THROUGHPUT_KBPS} KB/s floor)"
+      fi
     fi
   fi
   if [ -z "$reason" ] && [ -n "${HEALTH_CMD:-}" ]; then
@@ -616,13 +664,22 @@ else
   captcha="$now_captcha"
 fi
 
+# Failures are counted over a window of recent checks. A run of consecutive ones is
+# the wrong unit: the tunnel that most needs rotating is the one that is degraded
+# rather than dead, and that one passes every other check — which reset the counter
+# to zero and put the rotation permanently out of reach.
 if [ -z "$reason" ]; then
   [ "$fails" -gt 0 ] && log "recovered (exit $(curl -s --max-time 15 "${S[@]}" https://api.ipify.org 2>/dev/null), country ${gl:-?})"
-  fails=0
+  window="${window}0"
 else
-  fails=$((fails + 1))
-  log "check failed ($reason), consecutive=$fails"
+  window="${window}1"
 fi
+# Trimmed only when it is already longer than the window: a negative offset larger
+# than the string is not a no-op in bash, it yields the empty string — which would
+# silently forget every failure until five checks had accumulated.
+[ "${#window}" -gt "${FAIL_WINDOW:-5}" ] && window="${window: -${FAIL_WINDOW:-5}}"
+ones="${window//0/}"; fails="${#ones}"
+[ -n "$reason" ] && log "check failed ($reason), $fails of the last ${#window} checks"
 # Always record the rate: this is the history that makes a slow decline legible.
 [ -n "$kbps" ] && log "throughput ${kbps} KB/s (country ${gl:-?})"
 
@@ -636,10 +693,10 @@ if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] && [ $((now - last_rotate)) -ge "${RO
   sleep 45
   new="$(curl -s --max-time 20 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
   log "rotated: $old -> $new"
-  fails=0; last_rotate=$now
+  fails=0; window=""; last_rotate=$now
 fi
 
-printf 'fails=%s\nlast_rotate=%s\ncaptcha=%s\n' "$fails" "$last_rotate" "$captcha" > "$STATE"
+printf 'fails=%s\nlast_rotate=%s\ncaptcha=%s\nwindow=%s\n' "$fails" "$last_rotate" "$captcha" "$window" > "$STATE"
 WD
 chmod 755 /usr/local/sbin/vps-psiphon-watchdog
 touch /var/log/vps-psiphon-watchdog.log

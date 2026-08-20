@@ -239,14 +239,29 @@ Five rotation triggers, in order of how certain they are:
    The rate is measured on the country check's own fetch, so it costs no extra
    traffic; below `MIN_THROUGHPUT_KBPS` counts as a failure. Every check logs its
    rate, which is what makes a gradual decline visible at all.
+
+   The floor is one number for every node, and 800 KB/s is where measurement put it:
+   replaying three nodes' own logged history (~40 hours each, medians 1765 / 1987 /
+   3079 KB/s) through the window rule, 800 causes no rotation on any of them while
+   1000 costs the slowest two and 1200 five — and a real collapse is caught on the
+   second check either way. What made the old default of 100 useless was its distance
+   from reality: a working tunnel reads in the thousands, so a fifteen-fold collapse
+   passed for health. The gate is skipped for
+   `THROUGHPUT_GRACE_SEC` after a start: a freshly dialled tunnel is still ramping
+   while every client the restart cut loose reconnects at once, and that first
+   reading is far below where the tunnel settles minutes later.
 5. **`HEALTH_CMD`** — an optional command of your own; a non-zero exit rotates.
 
 Google's captcha wall (`302 → /sorry/index`) is shown in `status` and logged when it
 changes, but never rotates on its own: a human solves a captcha in seconds, and
 churning the tunnel over one costs more than it saves.
 
-Threshold is 2 consecutive failures, cooldown between rotations 30 minutes
-(`FAIL_THRESHOLD`, `ROTATE_COOLDOWN`). Journal: `/var/log/vps-psiphon-watchdog.log`.
+Threshold is 2 failures within the last 5 checks, cooldown between rotations 30
+minutes (`FAIL_THRESHOLD`, `FAIL_WINDOW`, `ROTATE_COOLDOWN`). A window rather than a
+run of consecutive failures, because the tunnel that most needs rotating is the one
+that is degraded rather than dead — and that one passes every other check, which
+resets a consecutive counter and keeps the rotation permanently out of reach.
+Journal: `/var/log/vps-psiphon-watchdog.log`.
 
 Rotation is meaningful here because Psiphon exits live on heterogeneous third-party
 infrastructure — reconnecting changes both the address and the ASN.
@@ -319,7 +334,9 @@ is run as a command.
 | Setting | Effect |
 |---|---|
 | `OK_REGIONS='DE NL JP'` | acceptable verdicts when no region is pinned; ignored while `EGRESS_REGION` is set |
-| `MIN_THROUGHPUT_KBPS=100` | throughput floor in KB/s, measured on the watchdog's own fetch; `0` disables the check |
+| `MIN_THROUGHPUT_KBPS=800` | throughput floor in KB/s, measured on the watchdog's own fetch. One value for every node; change it only for a node that genuinely cannot reach it. `0` disables the check |
+| `FAIL_WINDOW=5` | how many recent checks `FAIL_THRESHOLD` failures are counted over |
+| `THROUGHPUT_GRACE_SEC=300` | seconds after a container start during which the rate is logged but not judged, while the tunnel ramps |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through, and the country check's allow-list; empty pins rotations to `EGRESS_REGION` |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first and in every mode, unlike the allow-lists above; empty disables it |
 | `HEALTH_CMD='curl -sf --socks5-hostname $BIND:$SOCKS_PORT -o /dev/null https://example.com/'` | extra probe; non-zero exit rotates. `$SOCKS_PORT` is exported for it |
