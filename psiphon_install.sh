@@ -550,6 +550,9 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #      Not every mismatch weighs the same: Psiphon is used mostly from America, so
 #      Google has reclassified many of its exits as US — harmless in practice. It is
 #      a rewrite to a sanctioned region that breaks the service, hence trigger 2.
+#   4a. stalled tunnel — SOCKS answers the liveness probe, yet no HTTP request through
+#      the tunnel completes. Rated by the absence of a response, not by its size, so a
+#      captcha page (small, but a response) is never mistaken for a stall.
 #   4. slow tunnel    — the exit answers from the right country but carries almost
 #      nothing. Psiphon picks its server per tunnel, so a bad pick stays until
 #      something forces a reconnect, while liveness and country both stay green
@@ -596,8 +599,11 @@ if [ "$alive" = 0 ]; then
 else
   # One fetch serves two checks: the country verdict and how fast it arrived.
   ytf="$(mktemp)"
-  spd="$(LC_ALL=C curl -s --max-time 25 "${S[@]}" -H 'Accept-Language: en-US' \
-         -o "$ytf" -w '%{speed_download}' https://www.youtube.com/ 2>/dev/null || echo 0)"
+  # The status code is read alongside the rate because the two failures below are told
+  # apart by whether an HTTP transaction completed at all, not by how big it was.
+  probe="$(LC_ALL=C curl -s --max-time 25 "${S[@]}" -H 'Accept-Language: en-US' \
+           -o "$ytf" -w '%{speed_download} %{http_code}' https://www.youtube.com/ 2>/dev/null || echo '0 000')"
+  spd="${probe%% *}"; code="${probe##* }"
   gl="$(grep -oE '"GL":"[A-Z]{2}"' "$ytf" 2>/dev/null | head -1 | cut -d'"' -f4)"
   got="$(stat -c %s "$ytf" 2>/dev/null || echo 0)"
   rm -f "$ytf"
@@ -641,6 +647,15 @@ else
   up_for=999999
   started="$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-vps-psiphon}" 2>/dev/null)"
   [ -n "$started" ] && up_for=$(( $(date +%s) - $(date -d "$started" +%s 2>/dev/null || echo 0) ))
+  # A tunnel that completes no HTTP transaction at all, seconds after SOCKS answered
+  # the liveness probe, is broken — and until now that read as perfectly healthy: the
+  # rate gate needs 50 KB before a rate means anything, so a zero-byte fetch fell
+  # straight through it and was logged as "0 KB/s" with no verdict. Judged strictly by
+  # the ABSENCE of a response, never by a small one: Google's captcha is a small
+  # response, and rotating on a captcha is deliberately not wanted.
+  if [ -z "$reason" ] && [ "$code" = "000" ]; then
+    reason="stalled-tunnel (no HTTP response in 25s while SOCKS answered)"
+  fi
   if [ -z "$reason" ] && [ "${MIN_THROUGHPUT_KBPS:-0}" -gt 0 ] && [ "$got" -ge 50000 ]; then
     if [ "$kbps" -lt "${MIN_THROUGHPUT_KBPS}" ]; then
       if [ "$up_for" -lt "${THROUGHPUT_GRACE_SEC:-300}" ]; then

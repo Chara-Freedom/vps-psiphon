@@ -233,7 +233,10 @@ Five rotation triggers, in order of how certain they are:
    open, which is why it is worth naming them separately and checking them always.
 3. **wrong country** — Google's own verdict about the exit does not match the region
    you asked for.
-4. **slow tunnel** — the exit answers, from the right country, and carries almost
+4. **stalled tunnel** — SOCKS answers the liveness probe, but no HTTP request through
+   the tunnel completes at all. Judged by the absence of a response rather than its
+   size, so Google's captcha — small, but a response — is never read as a stall.
+5. **slow tunnel** — the exit answers, from the right country, and carries almost
    nothing. Psiphon picks its server once per tunnel, so a bad pick persists until
    something forces a reconnect, and both checks above stay green the whole time.
    The rate is measured on the country check's own fetch, so it costs no extra
