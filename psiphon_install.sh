@@ -86,6 +86,8 @@ psiphon_install.sh [options]
                        userspace instead — 0.10 of a core sustained on a node
                        carrying ~100 new connections/s, 0.27-0.36 at peak. On a
                        1-core box that copy is the difference that matters.
+                       Any address is accepted, a public one included; that is
+                       your call, and the access control it then needs is yours.
   --bind-loopback      publish on 127.0.0.1 instead. Narrower — only processes
                        on the host reach it, whereas the gateway is also
                        reachable by containers on the default bridge — at the
@@ -442,8 +444,11 @@ set -euo pipefail
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 # NOTE: the BIND prefix is load-bearing. Publishing without it exposes an OPEN
 # SOCKS5 PROXY to the internet — psiphon binds 0.0.0.0 inside the container.
-# Both supported values are host-private (loopback, or the docker0 gateway); what
-# BIND must never become is a wildcard or a public address.
+# Both values this installer picks on its own are host-private (loopback, or the
+# docker0 gateway). A --bind you typed yourself is honoured exactly as given, a
+# wildcard or a public address included: that is a deliberate choice, and nothing
+# here second-guesses it. What such an address publishes is an unauthenticated
+# proxy, so the access control in front of it is yours to add.
 PUB=( -p "${BIND}:${SOCKS_PORT}:${SOCKS_PORT}" )
 # Default to publishing it, so env files written before this was an option keep
 # their old behaviour instead of silently losing the HTTP proxy.

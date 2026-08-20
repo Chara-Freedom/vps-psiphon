@@ -31,10 +31,12 @@ hold both outbounds at once and split traffic by rules.
 > independent of anything you send. After that, strangers' traffic leaves through
 > your tunnel, on your bandwidth, and any egress filtering you run by port number
 > does not see it: whatever they do is encapsulated inside the tunnel's own
-> connection. This script never publishes on a wildcard for that reason. It binds
+> connection. This script never publishes on a wildcard of its own accord: it binds
 > either the docker0 gateway (the default) or `127.0.0.1` — both host-private, and
 > neither routable from outside. Which of the two, and why it matters, is under
-> [Where the SOCKS5 is published](#where-the-socks5-is-published).
+> [Where the SOCKS5 is published](#where-the-socks5-is-published). `--bind` takes
+> any other address you hand it, a public one included — that is your call to make,
+> and the access control such an address then needs is yours to add.
 >
 > If you use the image by hand regardless, the published ports are what you have to
 > change — both of them, in the compose file the image ships with:
@@ -162,7 +164,10 @@ in connection setup, so the busier the node, the worse loopback looks.
 
 Neither address is reachable from the internet. What the gateway costs is that
 other containers on the default bridge reach the tunnel too, which is what
-`--bind-loopback` is for when that matters more than the core does.
+`--bind-loopback` is for when that matters more than the core does. Those two are
+what the installer chooses between on its own; `--bind ADDR` publishes on any
+address you name instead, and guarding one that is reachable from outside is then
+yours to do.
 
 Moving this on an existing install takes two edits and needs both: re-run the
 installer with the new setting, and change the address in the outbound. The
@@ -348,8 +353,9 @@ aggregate differed fourfold between two German exits.
 - **The `BIND` prefix on the published ports is load-bearing.** Inside the
   container psiphon listens on `0.0.0.0`, so `-p 1080:1080` with no address prefix
   publishes an open SOCKS proxy to the internet. The script always supplies one —
-  the docker0 gateway or `127.0.0.1`, both host-private — and never a wildcard;
-  keep it in mind if you edit by hand.
+  the docker0 gateway or `127.0.0.1`, both host-private — and never picks a
+  wildcard on its own, though a `--bind` you name is used exactly as given. Keep
+  it in mind if you edit by hand.
 - **A host firewall does not contain a published container port.** Docker's publish
   is a DNAT rule in `nat/PREROUTING`, which runs before the filter rules ufw
   manages, so `ufw deny 1080` on an exposed port changes nothing and "the firewall
