@@ -48,6 +48,7 @@ ENVF=/etc/default/vps-psiphon
 # Ports asked for explicitly are honoured or refused, never silently moved.
 SOCKS_PORT_SET=0
 HTTP_PORT_SET=0
+PUBLISH_HTTP_SET=0
 
 usage() {
   cat <<'U'
@@ -69,7 +70,10 @@ psiphon_install.sh [options]
   --http-port N        HTTP proxy port, default 8080. Nothing here
                        consumes it, so a taken default is moved to the next free
                        port; a port you name explicitly is refused instead.
-  --no-http            do not publish the HTTP proxy at all
+  --no-http            do not publish the HTTP proxy at all. Remembered: a
+                       later reinstall keeps it unpublished
+  --http               publish it after all — undoes a stored --no-http, and
+                       restores the proxy when an earlier run found no free port
   --deny-regions 'CC…' countries the exit must never be in, space or comma
                        separated. Default: RU BY IR SY CU KP CN VE. Unlike the
                        region and the pool, this is checked in EVERY mode — with
@@ -105,7 +109,8 @@ while [ $# -gt 0 ]; do
     --device-region) DEVICE_REGION="${2:-}"; shift 2 ;;
     --socks-port)    SOCKS_PORT="${2:?}"; SOCKS_PORT_SET=1; shift 2 ;;
     --http-port)     HTTP_PORT="${2:?}";  HTTP_PORT_SET=1;  shift 2 ;;
-    --no-http)       PUBLISH_HTTP=0;         shift   ;;
+    --no-http)       PUBLISH_HTTP=0; PUBLISH_HTTP_SET=1; shift ;;
+    --http)          PUBLISH_HTTP=1; PUBLISH_HTTP_SET=1; shift ;;
     --deny-regions)
       DENY_REGIONS="$(printf '%s' "${2:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
       DENY_REGIONS_SET=1; shift 2 ;;
@@ -225,12 +230,21 @@ free_port() {
 # the dangerous case rather than the untidy one: it is the port the panel's outbound
 # names, so silently resetting it to the default would point the outbound at nothing.
 # An explicit --socks-port/--http-port still wins over the stored value.
+#
+# Whether the HTTP proxy is published at all is restored the same way, because
+# --no-http is a decision and a reinstall that quietly undid it would hand back a
+# port the operator had removed on purpose. What is stored is the outcome, so an
+# install where the fallback below ran out of free ports also stays unpublished —
+# --http asks for it back.
 if [ -r "$ENVF" ]; then
   if [ "$SOCKS_PORT_SET" = 0 ]; then
     V="$(sed -n 's/^SOCKS_PORT=//p' "$ENVF" | head -1)"; [ -n "$V" ] && SOCKS_PORT="$V"
   fi
   if [ "$HTTP_PORT_SET" = 0 ]; then
     V="$(sed -n 's/^HTTP_PORT=//p' "$ENVF" | head -1)"; [ -n "$V" ] && HTTP_PORT="$V"
+  fi
+  if [ "$PUBLISH_HTTP_SET" = 0 ]; then
+    V="$(sed -n 's/^PUBLISH_HTTP=//p' "$ENVF" | head -1)"; [ -n "$V" ] && PUBLISH_HTTP="$V"
   fi
 fi
 

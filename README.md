@@ -81,7 +81,8 @@ Requires root, docker and curl.
 | `--device-region CC` | autodetected | region the client reports (cosmetic — the server decides by GeoIP) |
 | `--socks-port N` | 1080 | SOCKS5 port for xray |
 | `--http-port N` | 8080 | HTTP proxy port |
-| `--no-http` | — | do not publish the HTTP proxy at all |
+| `--no-http` | — | do not publish the HTTP proxy at all; remembered across reinstalls |
+| `--http` | — | publish it after all — undoes a stored `--no-http` |
 | `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked in every mode. Empty disables it |
 | `--bind ADDR` | docker0 gateway | host address the ports are published on |
 | `--bind-loopback` | — | publish on `127.0.0.1` instead of the gateway |
@@ -109,7 +110,10 @@ are checked up front instead, and the two are not treated alike:
   one for `--socks-port`.
 - **HTTP** is moved to the next free port, because nothing in this setup consumes
   it. A port you name explicitly with `--http-port` is refused rather than
-  reinterpreted; `--no-http` skips publishing it entirely.
+  reinterpreted; `--no-http` skips publishing it entirely. That last one is
+  stored, so a reinstall keeps the proxy unpublished until `--http` asks for it
+  back — a decision to remove a port should not be undone by re-running the
+  installer.
 
 A collision is judged the way the kernel judges it, not by comparing strings: a
 listener on `0.0.0.0` blocks every bind of that port, so a neighbouring container
