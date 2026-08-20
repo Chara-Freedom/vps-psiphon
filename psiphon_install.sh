@@ -754,7 +754,11 @@ case "${1:-status}" in
     echo "rotating (fresh tunnel, new exit)…"
     moved="$(/usr/local/sbin/vps-psiphon-advance-region 2>/dev/null)"
     [ -n "$moved" ] && echo "region    : $moved"
-    systemctl restart vps-psiphon.service; sleep 45; status ;;
+    systemctl restart vps-psiphon.service; sleep 45
+    # advance-region rewrote the env file. Without re-reading it, the status below
+    # judges the new exit against the region we just left and calls it a mismatch.
+    [ -r /etc/default/vps-psiphon ] && . /etc/default/vps-psiphon
+    status ;;
   pool)
     # An empty string is a valid argument here — it clears the pool — so this
     # tests for a MISSING argument, not an empty one.
