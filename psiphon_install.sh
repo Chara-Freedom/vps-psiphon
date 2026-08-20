@@ -450,7 +450,13 @@ MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-800}
 # reconnects at once: the first check after a rotation read 73 KB/s on a tunnel that
 # settled at 1500 a few minutes later. Judging that reading would rotate a healthy
 # tunnel away and start the same race again. Liveness and country are still checked.
-THROUGHPUT_GRACE_SEC=${OLD_GRACE:-300}
+#
+# It has to be LONGER than the gap between checks, or it protects nothing: the timer
+# fires every 10 minutes, so with the 300 it shipped with, the one reading it existed
+# to excuse — the first after a restart — always landed outside it, and across three
+# nodes it never once applied. At 900 that check is skipped and the next one, twenty
+# minutes into the tunnel's life, is judged normally.
+THROUGHPUT_GRACE_SEC=${OLD_GRACE:-900}
 # Countries to rotate through, space separated. Empty = stay in EGRESS_REGION and
 # only change server within it. A pool is what you want when one country is busy:
 # each rotation advances to the next entry, so the retry draws on a different
@@ -658,7 +664,7 @@ else
   fi
   if [ -z "$reason" ] && [ "${MIN_THROUGHPUT_KBPS:-0}" -gt 0 ] && [ "$got" -ge 50000 ]; then
     if [ "$kbps" -lt "${MIN_THROUGHPUT_KBPS}" ]; then
-      if [ "$up_for" -lt "${THROUGHPUT_GRACE_SEC:-300}" ]; then
+      if [ "$up_for" -lt "${THROUGHPUT_GRACE_SEC:-900}" ]; then
         log "slow (${kbps} KB/s) but the tunnel is ${up_for}s old — still ramping, not judged"
       else
         reason="slow-tunnel (${kbps} KB/s < ${MIN_THROUGHPUT_KBPS} KB/s floor)"
