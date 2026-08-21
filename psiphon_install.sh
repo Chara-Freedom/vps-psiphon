@@ -442,7 +442,7 @@ DENY_REGIONS='$DENY_REGIONS'
 # its precision but its distance from reality — a working tunnel reads in the
 # thousands, so a fifteen-fold collapse stayed below every alarm for over an hour.
 #
-# Change it for a node that genuinely cannot reach it — and replay `grep throughput`
+# Change it for a node that genuinely cannot reach it — and replay \`grep throughput\`
 # from that node's watchdog log before concluding that it cannot.
 MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-800}
 # Seconds after the container starts during which the throughput gate is skipped. A
