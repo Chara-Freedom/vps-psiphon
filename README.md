@@ -86,6 +86,7 @@ Requires root, docker and curl.
 | `--no-http` | — | do not publish the HTTP proxy at all; remembered across reinstalls |
 | `--http` | — | publish it after all — undoes a stored `--no-http` |
 | `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked in every mode. Empty disables it |
+| `--accept 'CC…'` | everything requested, plus `US` | countries Google's verdict may report — *not* the same question as which countries to ask for. `any` accepts every verdict and leaves the deny-list as the only country check |
 | `--bind ADDR` | docker0 gateway | host address the ports are published on |
 | `--bind-loopback` | — | publish on `127.0.0.1` instead of the gateway |
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
@@ -198,6 +199,7 @@ vps-psiphon                 state: region, exit IP, Google's country verdict, tr
 vps-psiphon rotate          fresh tunnel → different exit IP
 vps-psiphon region JP       change exit country
 vps-psiphon pool 'DE NL FR' countries to rotate through ('' clears it)
+vps-psiphon accept 'DE US'  verdicts to tolerate ('' restores the default)
 vps-psiphon speed           50 MB single stream + 4 streams aggregate
 vps-psiphon logs [n]        Psiphon client log
 vps-psiphon watchdog [n]    watchdog journal
@@ -231,8 +233,14 @@ Five rotation triggers, in order of how certain they are:
    The two lists are not alternatives. The set of acceptable countries is closed and
    short, so an allow-list handles a pinned region well; the set of dangerous ones is
    open, which is why it is worth naming them separately and checking them always.
-3. **wrong country** — Google's own verdict about the exit does not match the region
-   you asked for.
+3. **wrong country** — Google's verdict about the exit is not one of the countries
+   you accept (`ACCEPT_REGIONS`, default: everything requested plus `US`). This is
+   deliberately a different list from the one you ask for. `GL` is Google's opinion
+   about an *address*, not the server's location, and it rewrites many Psiphon exits
+   to `US` whatever country they report — so judging the verdict against the request
+   rotated exits that were fast and healthy. `US` is in the default because Google
+   gates none of the services this tool exists to reach behind it; a verdict of, say,
+   `SG` still rotates, because that one costs latency.
 4. **stalled tunnel** — SOCKS answers the liveness probe, but no HTTP request through
    the tunnel completes at all. Judged by the absence of a response rather than its
    size, so Google's captcha — small, but a response — is never read as a stall.
@@ -340,7 +348,8 @@ is run as a command.
 | `MIN_THROUGHPUT_KBPS=800` | throughput floor in KB/s, measured on the watchdog's own fetch. One value for every node; change it only for a node that genuinely cannot reach it. `0` disables the check |
 | `FAIL_WINDOW=5` | how many recent checks `FAIL_THRESHOLD` failures are counted over |
 | `THROUGHPUT_GRACE_SEC=900` | seconds after a container start during which the rate is logged but not judged, while the tunnel ramps. Keep it longer than the gap between checks, or the one reading it exists to excuse falls outside it |
-| `REGION_POOL='DE NL FR'` | countries each rotation advances through, and the country check's allow-list; empty pins rotations to `EGRESS_REGION` |
+| `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
+| `ACCEPT_REGIONS='DE NL FR AT US'` | verdicts the country check tolerates. Empty = the computed default: everything requested, plus `US`. `any` accepts every country and leaves `DENY_REGIONS` as the only country check |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first and in every mode, unlike the allow-lists above; empty disables it |
 | `HEALTH_CMD='curl -sf --socks5-hostname $BIND:$SOCKS_PORT -o /dev/null https://example.com/'` | extra probe; non-zero exit rotates. `$SOCKS_PORT` is exported for it |
 

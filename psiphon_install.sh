@@ -42,6 +42,15 @@ PUBLISH_HTTP=1
 # exit there is useless for the same reason. A false positive costs one rotation.
 DENY_REGIONS_DEFAULT="RU BY IR SY CU KP CN VE"
 DENY_REGIONS=""; DENY_REGIONS_SET=0
+# Countries the exit MAY be seen in, which is a different question from the ones we
+# ask Psiphon for. GL is Google's own opinion about an address, not the server's
+# location: it rewrites many Psiphon exits to US whatever country they report, and
+# that rewrite is harmless — US is not a region Google gates the services this tool
+# exists to reach. Judging the verdict against the request therefore rotated exits
+# that were healthy and fast. Empty means the computed default: everything
+# requested, plus US. The word "any" accepts every verdict and leaves the deny-list
+# as the only country check.
+ACCEPT_REGIONS=""; ACCEPT_REGIONS_SET=0
 
 CONF_DIR=/opt/vps-psiphon/config
 ENVF=/etc/default/vps-psiphon
@@ -79,6 +88,14 @@ psiphon_install.sh [options]
                        region and the pool, this is checked in EVERY mode — with
                        no --region and no OK_REGIONS it is the only country check
                        there is. An empty string disables it.
+  --accept 'CC…'       countries Google's verdict may report, space or comma
+                       separated. This is NOT the pool: the pool is what Psiphon
+                       is asked for, this is what is accepted once Google has had
+                       its say about the address it handed us. Default: everything
+                       requested plus US, because Google rewrites many Psiphon
+                       exits to US regardless of where they are, and that costs
+                       nothing. Pass 'any' to accept every country and leave
+                       --deny-regions as the only country check.
   --bind ADDR          host address to publish the SOCKS5 on. Default: the
                        docker0 gateway (usually 172.17.0.1). Publishing there
                        lets the kernel DNAT the traffic; publishing on loopback
@@ -116,6 +133,9 @@ while [ $# -gt 0 ]; do
     --deny-regions)
       DENY_REGIONS="$(printf '%s' "${2:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
       DENY_REGIONS_SET=1; shift 2 ;;
+    --accept)
+      ACCEPT_REGIONS="$(printf '%s' "${2:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
+      ACCEPT_REGIONS_SET=1; shift 2 ;;
     --bind)          BIND="${2:?}";          shift 2 ;;
 
     --bind-loopback) BIND=127.0.0.1;         shift   ;;
@@ -335,7 +355,7 @@ chown -R 1000:1000 "$CONF_DIR"
 
 # Preserve operator-set values across a reinstall.
 OLD_HEALTH_CMD=""; OLD_OK_REGIONS=""; OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""
-OLD_FAIL_WINDOW=""; OLD_GRACE=""
+OLD_FAIL_WINDOW=""; OLD_GRACE=""; OLD_ACCEPT_REGIONS=""
 # Tracked as set-or-not rather than by value: a deliberately emptied deny-list is a
 # real choice, and must not be undone by the default on the next reinstall.
 OLD_DENY_SET=0; OLD_DENY_REGIONS=""
@@ -356,6 +376,8 @@ if [ -r "$ENVF" ]; then
   OLD_REGION_POOL="$(sed -n 's/^REGION_POOL=//p' "$ENVF" | tr -d "'")"
   # An explicit --region wins; otherwise an existing pool survives the reinstall.
   [ "$REGION_POOL_SET" = 1 ] || REGION_POOL="$OLD_REGION_POOL"
+  OLD_ACCEPT_REGIONS="$(sed -n 's/^ACCEPT_REGIONS=//p' "$ENVF" | tr -d "'")"
+  [ "$ACCEPT_REGIONS_SET" = 1 ] || ACCEPT_REGIONS="$OLD_ACCEPT_REGIONS"
 fi
 
 # Checked here rather than earlier: the pool is only known once it has been either
@@ -365,6 +387,13 @@ fi
 for r in ${EGRESS_REGION:-} ${REGION_POOL:-}; do
   case " $DENY_REGIONS " in
     *" $r "*) say "!! '$r' is both requested and denied — every exit there will be rejected" ;;
+  esac
+done
+# The deny-list is checked first, so an overlap is not ambiguous — it is just a
+# line that never does what its author meant.
+for r in ${ACCEPT_REGIONS:-}; do
+  case " $DENY_REGIONS " in
+    *" $r "*) say "!! '$r' is both accepted and denied — denied wins, it is checked first" ;;
   esac
 done
 
@@ -464,6 +493,16 @@ THROUGHPUT_GRACE_SEC=${OLD_GRACE:-900}
 # the pool is also what stops the watchdog calling a legitimate exit "wrong
 # country", so anything you list here you are accepting as a destination.
 REGION_POOL='$REGION_POOL'
+# Countries Google's verdict is allowed to report — deliberately NOT the same list
+# as REGION_POOL. The pool is what Psiphon is asked for; this is what is accepted
+# once Google has had its say about the address it handed us, and the two differ in
+# practice: Google rewrites many Psiphon exits to US no matter what country the
+# server reports, so judging its verdict against the request rotated exits that
+# were healthy and fast. Empty means the computed default, which is everything
+# requested (REGION_POOL, plus EGRESS_REGION when it was pinned outside the pool)
+# plus US. The word any accepts every verdict and leaves DENY_REGIONS as the only
+# country check. Sanctioned regions are rejected either way: deny is checked first.
+ACCEPT_REGIONS='$ACCEPT_REGIONS'
 HEALTH_CMD=$OLD_HEALTH_CMD
 EOF
 chmod 600 "$ENVF"
@@ -623,21 +662,33 @@ else
     case " ${DENY_REGIONS:-} " in
       *" $gl "*) reason="denied-country (Google sees $gl — sanctioned or Google-blocked)"; denied=1 ;;
     esac
-    # With a pool, every country in it is a destination we accepted, so the
-    # verdict is judged against the whole pool — otherwise the watchdog would
-    # call its own last rotation a wrong-country failure and rotate forever.
+    # What we ASK Psiphon for and what we ACCEPT from Google are two different
+    # lists, and conflating them was a real cost: GL is Google's opinion about an
+    # address, not the server's location, and it rewrites many Psiphon exits to US
+    # whatever country they report — so a fast, healthy FR exit seen as US was
+    # rotated away for nothing. ACCEPT_REGIONS holds the verdicts tolerated.
     if [ "$denied" = 0 ]; then
-      if [ -n "${REGION_POOL:-}" ]; then
-        case " $REGION_POOL " in
+      acc="${ACCEPT_REGIONS:-}"
+      if [ -z "$acc" ]; then
+        if [ -n "${REGION_POOL:-}${EGRESS_REGION:-}" ]; then
+          # Everything requested — the pool, plus a region pinned outside it by
+          # hand, which the watchdog must not then reject — and US, the one
+          # rewrite known to be harmless. Deduplicated so the log line stays
+          # readable, since EGRESS_REGION is normally already in the pool.
+          for r in ${REGION_POOL:-} ${EGRESS_REGION:-} US; do
+            case " $acc " in *" $r "*) ;; *) acc="${acc:+$acc }$r" ;; esac
+          done
+        else
+          # Auto with an operator-set allow-list behaves as it always did; auto
+          # with neither leaves the deny-list as the only country check, which is
+          # that mode's documented behaviour.
+          acc="${OK_REGIONS:-}"
+        fi
+      fi
+      if [ -n "$acc" ] && [ "$acc" != any ]; then
+        case " $acc " in
           *" $gl "*) : ;;
-          *) reason="wrong-country (Google sees $gl, not in pool '$REGION_POOL')" ;;
-        esac
-      elif [ -n "${EGRESS_REGION:-}" ] && [ "$gl" != "$EGRESS_REGION" ]; then
-        reason="wrong-country (asked $EGRESS_REGION, Google sees $gl)"
-      elif [ -z "${EGRESS_REGION:-}" ] && [ -n "${OK_REGIONS:-}" ]; then
-        case " $OK_REGIONS " in
-          *" $gl "*) : ;;
-          *) reason="wrong-country (Google sees $gl, not in '$OK_REGIONS')" ;;
+          *) reason="wrong-country (Google sees $gl; asked ${EGRESS_REGION:-auto}, accepted '$acc')" ;;
         esac
       fi
     fi
@@ -743,6 +794,22 @@ CONF_DIR="${CONF_DIR:-/opt/vps-psiphon/config}"
 BIND="${BIND:-127.0.0.1}"
 S=(--socks5-hostname "${BIND}:${SOCKS_PORT}")
 
+# Same rule the watchdog applies, so status never disagrees with the thing that
+# actually rotates.
+accepted_regions() {
+  acc="${ACCEPT_REGIONS:-}"
+  if [ -z "$acc" ]; then
+    if [ -n "${REGION_POOL:-}${EGRESS_REGION:-}" ]; then
+      for r in ${REGION_POOL:-} ${EGRESS_REGION:-} US; do
+        case " $acc " in *" $r "*) ;; *) acc="${acc:+$acc }$r" ;; esac
+      done
+    else
+      acc="${OK_REGIONS:-}"
+    fi
+  fi
+  printf '%s' "$acc"
+}
+
 status() {
   echo "container : $(docker ps --filter "name=^${NAME}$" --format '{{.Status}}' || echo 'DOWN')"
   echo "service   : $(systemctl is-active vps-psiphon.service) / $(systemctl is-enabled vps-psiphon.service 2>/dev/null)"
@@ -750,6 +817,8 @@ status() {
   echo "socks     : ${BIND}:${SOCKS_PORT}   (region requested: ${EGRESS_REGION:-auto})"
   [ -n "${REGION_POOL:-}" ] && echo "pool      : ${REGION_POOL}   (each rotation advances one step)"
   [ -n "${DENY_REGIONS:-}" ] && echo "deny      : ${DENY_REGIONS}   (rejected in every mode, checked first)"
+  acc="$(accepted_regions)"
+  [ -n "$acc" ] && echo "accept    : ${acc}   (verdicts tolerated — the pool is only what we ask for)"
   if [ "$PUBLISH_HTTP" = 1 ]; then
     echo "http      : ${BIND}:${HTTP_PORT}   (unused by xray; handy for curl -x)"
   else
@@ -761,8 +830,14 @@ status() {
   echo -n "exit IP   : "; curl -s --max-time 20 "${S[@]}" https://api.ipify.org 2>/dev/null || echo 'UNREACHABLE'; echo
   local gl; gl="$(curl -s --max-time 25 "${S[@]}" -H 'Accept-Language: en-US' https://www.youtube.com/ 2>/dev/null \
                   | grep -oE '"GL":"[A-Z]{2}"' | head -1 | cut -d'"' -f4)"
-  if [ -n "${EGRESS_REGION:-}" ] && [ -n "$gl" ] && [ "$gl" != "$EGRESS_REGION" ]; then
-    echo "country   : ${gl} — MISMATCH, asked for ${EGRESS_REGION}; region-gated services will refuse"
+  ok=1
+  if [ -n "$gl" ] && [ -n "$acc" ] && [ "$acc" != any ]; then
+    case " $acc " in *" $gl "*) ;; *) ok=0 ;; esac
+  fi
+  if [ "$ok" = 0 ]; then
+    echo "country   : ${gl} — NOT ACCEPTED (accepted: ${acc}); the watchdog will rotate"
+  elif [ -n "${EGRESS_REGION:-}" ] && [ -n "$gl" ] && [ "$gl" != "$EGRESS_REGION" ]; then
+    echo "country   : ${gl}   (asked ${EGRESS_REGION} — accepted; Google rewrites exits, and that alone is not a fault)"
   else
     echo "country   : ${gl:-?}   (Google's own verdict about this exit)"
   fi
@@ -799,6 +874,21 @@ case "${1:-status}" in
       esac
     else
       echo "pool cleared — rotations stay in ${EGRESS_REGION:-auto}"
+    fi ;;
+  accept)
+    # An empty string is a valid argument — it restores the computed default — so
+    # this tests for a MISSING argument, not an empty one.
+    [ $# -ge 2 ] || { echo "usage: vps-psiphon accept '<CC CC …>|any'   (empty string restores the default)"; exit 1; }
+    na="$(printf '%s' "$2" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
+    sed -i "s/^ACCEPT_REGIONS=.*/ACCEPT_REGIONS='$na'/" /etc/default/vps-psiphon
+    ACCEPT_REGIONS="$na"
+    if [ -n "$na" ]; then
+      echo "accept    : $na"
+      for d in ${DENY_REGIONS:-}; do
+        case " $na " in *" $d "*) echo "note      : $d is also denied — denied wins, it is checked first" ;; esac
+      done
+    else
+      echo "accept    : $(accepted_regions)   (back to the default: everything requested, plus US)"
     fi ;;
   region)
     [ -n "${2:-}" ] || { echo "usage: vps-psiphon region <CC|auto>"; exit 1; }
