@@ -261,7 +261,6 @@ Five rotation triggers, in order of how certain they are:
    `THROUGHPUT_GRACE_SEC` after a start: a freshly dialled tunnel is still ramping
    while every client the restart cut loose reconnects at once, and that first
    reading is far below where the tunnel settles minutes later.
-5. **`HEALTH_CMD`** — an optional command of your own; a non-zero exit rotates.
 
 Google's captcha wall (`302 → /sorry/index`) is shown in `status` and logged when it
 changes, but never rotates on its own: a human solves a captcha in seconds, and
@@ -331,10 +330,12 @@ Psiphon is consistent across both — asking for JP, NL or DE yields exactly `JP
 `NL`, `DE` from Google and from the geolocation services alike.
 
 **A correct country is necessary, not sufficient**, and this probe has a second limit
-worth knowing: `GL` is what Google thinks of the *address*. A signed-in user also
-carries account-level signals, so a logged-in session can behave more restrictively
-than this anonymous check suggests. `HEALTH_CMD` is where you put a check for what
-this one cannot see.
+worth knowing: `GL` is what Google thinks of the *address*, and that verdict can
+disagree with the geo-restrictions Google actually enforces on the very same address —
+an exit reading as the right country is still refused now and then. What tells you it
+is the address and not your account: an account-level restriction follows you from
+exit to exit, while this one disappears the moment the exit changes. No unauthenticated
+probe sees it, so it is yours to notice and `vps-psiphon rotate` to fix.
 
 ### Optional settings
 
@@ -351,7 +352,6 @@ is run as a command.
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
 | `ACCEPT_REGIONS='DE NL FR AT US'` | verdicts the country check tolerates. Empty = the computed default: everything requested, plus `US`. `any` accepts every country and leaves `DENY_REGIONS` as the only country check |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first and in every mode, unlike the allow-lists above; empty disables it |
-| `HEALTH_CMD='curl -sf --socks5-hostname $BIND:$SOCKS_PORT -o /dev/null https://example.com/'` | extra probe; non-zero exit rotates. `$SOCKS_PORT` is exported for it |
 
 ## Measurements
 

@@ -354,7 +354,7 @@ fi
 chown -R 1000:1000 "$CONF_DIR"
 
 # Preserve operator-set values across a reinstall.
-OLD_HEALTH_CMD=""; OLD_OK_REGIONS=""; OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""
+OLD_OK_REGIONS=""; OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""
 OLD_FAIL_WINDOW=""; OLD_GRACE=""; OLD_ACCEPT_REGIONS=""
 # Tracked as set-or-not rather than by value: a deliberately emptied deny-list is a
 # real choice, and must not be undone by the default on the next reinstall.
@@ -368,7 +368,6 @@ if [ "$DENY_REGIONS_SET" = 0 ]; then
   else DENY_REGIONS="$DENY_REGIONS_DEFAULT"; fi
 fi
 if [ -r "$ENVF" ]; then
-  OLD_HEALTH_CMD="$(sed -n 's/^HEALTH_CMD=//p' "$ENVF")"
   OLD_OK_REGIONS="$(sed -n 's/^OK_REGIONS=//p' "$ENVF")"
   OLD_MIN_THROUGHPUT="$(sed -n 's/^MIN_THROUGHPUT_KBPS=//p' "$ENVF")"
   OLD_FAIL_WINDOW="$(sed -n 's/^FAIL_WINDOW=//p' "$ENVF")"
@@ -449,9 +448,6 @@ OK_REGIONS=$OLD_OK_REGIONS
 # service, which is the failure this tool exists to escape — so a false positive
 # costs one rotation and a miss costs the service. Empty disables it.
 DENY_REGIONS='$DENY_REGIONS'
-# Optional extra probe for what no unauthenticated check can see: whether the
-# service you actually care about accepts this exit. Non-zero exit = rotate.
-#   HEALTH_CMD='curl -sf --max-time 15 --socks5-hostname $BIND:$SOCKS_PORT -o /dev/null https://example.com/'
 # Minimum throughput, KB/s, measured on the watchdog's own YouTube fetch — no extra
 # traffic. Below this on FAIL_THRESHOLD of the last FAIL_WINDOW checks, the tunnel is
 # rotated: Psiphon picks a server per tunnel, and a bad pick otherwise persists
@@ -503,7 +499,6 @@ REGION_POOL='$REGION_POOL'
 # plus US. The word any accepts every verdict and leaves DENY_REGIONS as the only
 # country check. Sanctioned regions are rejected either way: deny is checked first.
 ACCEPT_REGIONS='$ACCEPT_REGIONS'
-HEALTH_CMD=$OLD_HEALTH_CMD
 EOF
 chmod 600 "$ENVF"
 
@@ -608,14 +603,17 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #      because a degraded tunnel alternates across the floor instead of staying
 #      under it. The gate is skipped for THROUGHPUT_GRACE_SEC after a start, while
 #      the tunnel is still ramping.
-#   5. HEALTH_CMD     — anything further that only you can verify.
 #
 # Google's /sorry captcha is recorded but never rotates on its own: a human solves
 # one in seconds, and churning the tunnel over it costs more than it saves.
 #
-# A correct country is necessary, not sufficient. An exit can sit in the right
-# country and still be refused on the address's own reputation, and no unauthenticated
-# probe sees that — which is what HEALTH_CMD is for.
+# A correct country is necessary, not sufficient. GL is Google's opinion about the
+# ADDRESS, and it can disagree with the geo-restrictions Google enforces on that same
+# address: an exit reading as the right country is still refused now and then. What
+# tells you it is the address and not your account is that an account-level
+# restriction follows you from exit to exit, while this one disappears the moment the
+# exit changes. No unauthenticated probe sees it, so it is a human's to notice and
+# `vps-psiphon rotate`'s to fix.
 set -uo pipefail
 . /etc/default/vps-psiphon
 LOG=/var/log/vps-psiphon-watchdog.log
@@ -626,7 +624,6 @@ log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
 fails=0; last_rotate=0; captcha=0; window=""
 [ -r "$STATE" ] && . "$STATE"
-export SOCKS_PORT          # so HEALTH_CMD can reach the proxy
 
 alive=0
 # Retry once: a check that races tunnel establishment (boot, restart, rotate)
@@ -724,9 +721,6 @@ else
         reason="slow-tunnel (${kbps} KB/s < ${MIN_THROUGHPUT_KBPS} KB/s floor)"
       fi
     fi
-  fi
-  if [ -z "$reason" ] && [ -n "${HEALTH_CMD:-}" ]; then
-    sh -c "$HEALTH_CMD" >/dev/null 2>&1 || reason="health-cmd failed"
   fi
   # Informational only, and logged on change so a captcha'd exit does not fill the log.
   rd="$(curl -s -o /dev/null --max-time 25 "${S[@]}" -w '%{redirect_url}' \
