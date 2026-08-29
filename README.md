@@ -351,12 +351,15 @@ refuse a WARP exit, while services with honest IP geolocation are unaffected.**
 Psiphon is consistent across both — asking for JP, NL or DE yields exactly `JP`,
 `NL`, `DE` from Google and from the geolocation services alike.
 
-**A correct country is necessary, and it may or may not be sufficient.** `GL` is what
-Google thinks of the *address*, and that verdict can in principle disagree with the
-geo-restrictions Google actually enforces on the same address — an exit reading as the
-right country being refused anyway. Every case of that we chased turned out to be the
-IPv6 artifact above rather than a second mechanism, so treat this as a possibility to
-rule out with `curl -4` first, not as an established behaviour. What tells you it
+**A correct country is necessary, and it has never been caught being insufficient.**
+This section used to say that `GL` can disagree with the restrictions Google actually
+enforces on the same address — an exit reading as the right country being refused
+anyway. That is not what was observed. The one exit that looked like proof of it was
+refused on its **IPv4** address, and that address's `GL` had been saying `RU` the whole
+time: verdict and enforcement agreed exactly, on the same address. What disagreed was
+two addresses on one host, read by a probe that silently picked the one carrying no
+traffic. So force `-4` and take the answer at face value — if an exit in a supported
+country is refused, suspect the probe before inventing a second gate. What tells you it
 is the address and not your account: an account-level restriction follows you from
 exit to exit, while this one disappears the moment the exit changes. No unauthenticated
 probe sees it, so it is yours to notice and `vps-psiphon rotate` to fix.
