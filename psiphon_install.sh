@@ -327,10 +327,13 @@ fi
 if [ -z "$DEVICE_REGION" ]; then
   # ifconfig.co answers datacenter IPs with a Cloudflare challenge, so it cannot
   # be the only source. Try a few, take the first plausible country code.
+  # -4 is deliberate: on a dual-stack host an unflagged curl prefers the AAAA, so
+  # it would report the country of the v6 address while the tunnel this setting
+  # configures leaves over IPv4. Probe the address that actually carries it.
   for probe in https://ipinfo.io/country \
                https://api.country.is \
                https://ifconfig.co/country-iso ; do
-    DEVICE_REGION="$(curl -fsS --max-time 8 "$probe" 2>/dev/null \
+    DEVICE_REGION="$(curl -4 -fsS --max-time 8 "$probe" 2>/dev/null \
                      | grep -oE '\b[A-Z]{2}\b' | head -1 || true)"
     [ -n "$DEVICE_REGION" ] && break
   done

@@ -315,7 +315,8 @@ therefore answers honestly:
 |---|---|---|---|---|
 | Psiphon, region DE | DE | DE | `DE` | 200 |
 | Cloudflare WARP | FI | FI | **`RU`** | 200 |
-| The VPS's own address | FI | FI | `FI` | 200 |
+| The VPS's own address, over IPv6 | FI | FI | `FI` | 200 |
+| The VPS's own address, over IPv4 | FI | FI | **`RU`** | — |
 | A Russian VPS, as a control | RU | — | `RU` | **403, "Russia not available"** |
 
 Only Google calls the WARP exit Russian. Independent geolocation says Finland, and
@@ -324,15 +325,38 @@ this is not WARP leaking anyone's location. Google classifies those ranges that 
 for its own reasons, and changing WARP endpoints does not help, because the
 classification follows the range rather than the endpoint.
 
+⚠️ **Probe with `curl -4`, or you will measure an address nobody uses.** The last two
+rows are the same machine at the same moment, split only by which protocol the request
+left over. On a dual-stack host `getent ahosts www.youtube.com` returns the AAAA first,
+so an unflagged `curl` reads the country of the v6 address — while a Psiphon tunnel, and
+usually the traffic you care about, leaves over IPv4. That is not a hypothetical: the
+`FI` originally recorded for this VPS was an IPv6 reading, and forcing IPv4 turned it
+into `RU`, which is a supported-country failure rather than the mystery it looked like.
+Google also demonstrably rewrites an ordinary hoster address, not just a VPN provider's
+ranges, once enough traffic through it looks like it belongs somewhere else.
+
+```
+# the host itself
+curl -4 -s https://www.youtube.com/ | grep -o '"GL":"[A-Z]\{2\}"'
+
+# through the tunnel
+curl -4 -s --socks5-hostname 127.0.0.1:1080 https://www.youtube.com/ | grep -o '"GL":"[A-Z]\{2\}"'
+```
+
+`vps-psiphon status` and the watchdog are unaffected by this: both read `GL` through the
+SOCKS tunnel, so they see the exit's own address and nothing else.
+
 The consequence is therefore narrow and specific: **services gated on Google's view
 refuse a WARP exit, while services with honest IP geolocation are unaffected.**
 Psiphon is consistent across both — asking for JP, NL or DE yields exactly `JP`,
 `NL`, `DE` from Google and from the geolocation services alike.
 
-**A correct country is necessary, not sufficient**, and this probe has a second limit
-worth knowing: `GL` is what Google thinks of the *address*, and that verdict can
-disagree with the geo-restrictions Google actually enforces on the very same address —
-an exit reading as the right country is still refused now and then. What tells you it
+**A correct country is necessary, and it may or may not be sufficient.** `GL` is what
+Google thinks of the *address*, and that verdict can in principle disagree with the
+geo-restrictions Google actually enforces on the same address — an exit reading as the
+right country being refused anyway. Every case of that we chased turned out to be the
+IPv6 artifact above rather than a second mechanism, so treat this as a possibility to
+rule out with `curl -4` first, not as an established behaviour. What tells you it
 is the address and not your account: an account-level restriction follows you from
 exit to exit, while this one disappears the moment the exit changes. No unauthenticated
 probe sees it, so it is yours to notice and `vps-psiphon rotate` to fix.
