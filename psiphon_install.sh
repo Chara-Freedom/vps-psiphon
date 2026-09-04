@@ -10,6 +10,7 @@
 # Installs:
 #   /etc/default/vps-psiphon              parameters
 #   /usr/local/sbin/vps-psiphon-run       container launcher (systemd ExecStart)
+#   /usr/local/sbin/vps-psiphon-prestart  clears an orphaned docker-proxy (ExecStartPre)
 #   /usr/local/sbin/vps-psiphon-watchdog  liveness + burned-exit detector
 #   /usr/local/sbin/vps-psiphon           management CLI
 #   /etc/systemd/system/vps-psiphon.service
@@ -538,6 +539,75 @@ exec docker run --rm --name "$NAME" \
 RUN
 chmod 755 /usr/local/sbin/vps-psiphon-run
 
+# ---- orphaned-proxy sweeper -------------------------------------------------
+cat > /usr/local/sbin/vps-psiphon-prestart <<'PRE'
+#!/usr/bin/env bash
+# Clear a docker-proxy left behind by a container that died uncleanly.
+#
+# The container runs with --rm, so a bad death removes the container while
+# docker-proxy can outlive it, still holding the published port. `docker run` then
+# fails with exit code 125 ("address already in use") and Restart=always retries
+# into the same wall indefinitely. Seen in production: a node lost its tunnel at
+# 07:27 and was still looping three hours later while every external check kept
+# reporting the node healthy — the port was held, so nothing ever started, and the
+# watchdog's own rotations kept restarting a service that could not come up.
+#
+# Deliberately narrow. Only a docker-proxy is removed, and only when its cmdline
+# carries exactly our -host-ip/-host-port AND no running container publishes that
+# address. Anything else holding the port belongs to somebody else: killing it
+# silently would be a worse failure than letting docker fail loudly, so this leaves
+# it alone and says why.
+#
+# Ports come from the env file. Arguments override them, which is what makes both
+# interesting paths testable without touching a live tunnel.
+set -uo pipefail
+. /etc/default/vps-psiphon
+BIND="${BIND:-127.0.0.1}"
+
+log() { printf 'vps-psiphon-prestart: %s\n' "$*"; }
+
+free_port() {
+  local port="$1" line pid cmd
+  line="$(ss -tlnpH 2>/dev/null | awk -v a="${BIND}:${port}" '$4 == a {print; exit}')"
+  [ -z "$line" ] && return 0                      # free: the ordinary case
+
+  pid="$(printf '%s' "$line" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
+  [ -z "$pid" ] && { log "${BIND}:${port} is taken but its owner is not visible - leaving it"; return 0; }
+
+  cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+  case "$cmd" in
+    *docker-proxy*"-host-ip ${BIND} "*"-host-port ${port} "*) ;;
+    *) log "${BIND}:${port} is held by an unrelated process (pid $pid) - leaving it"; return 0 ;;
+  esac
+
+  # A live container publishing this address means the proxy is not an orphan.
+  if docker ps --format '{{.Ports}}' 2>/dev/null | grep -qF "${BIND}:${port}->"; then
+    log "${BIND}:${port} belongs to a running container - leaving it"
+    return 0
+  fi
+
+  log "clearing orphaned docker-proxy on ${BIND}:${port} (pid $pid)"
+  kill "$pid" 2>/dev/null
+  for _ in 1 2 3 4 5; do
+    sleep 1
+    ss -tlnpH 2>/dev/null | awk -v a="${BIND}:${port}" '$4 == a {found=1} END{exit !found}' || return 0
+  done
+  log "port not released on SIGTERM, escalating to SIGKILL"
+  kill -9 "$pid" 2>/dev/null
+  sleep 1
+  return 0
+}
+
+if [ "$#" -gt 0 ]; then
+  for p in "$@"; do free_port "$p"; done
+else
+  free_port "${SOCKS_PORT:-1080}"
+  [ "${PUBLISH_HTTP:-1}" = 1 ] && free_port "${HTTP_PORT:-8080}"
+fi
+exit 0
+PRE
+chmod 755 /usr/local/sbin/vps-psiphon-prestart
+
 # ---- region pool ------------------------------------------------------------
 cat > /usr/local/sbin/vps-psiphon-advance-region <<'ADV'
 #!/usr/bin/env bash
@@ -920,6 +990,7 @@ case "${1:-status}" in
     # to drop. Docker refuses if anything else still references it — that is fine.
     docker image rm "$IMAGE" >/dev/null 2>&1
     rm -f /usr/local/sbin/vps-psiphon-run /usr/local/sbin/vps-psiphon-watchdog \
+          /usr/local/sbin/vps-psiphon-prestart \
           /usr/local/sbin/vps-psiphon-advance-region \
           /etc/default/vps-psiphon /var/lib/vps-psiphon-watchdog.state \
           /var/log/vps-psiphon-watchdog.log /tmp/vpspsi.speed
@@ -930,6 +1001,7 @@ case "${1:-status}" in
     # Claiming "removed" is worth nothing unmeasured — look at the disk and say so.
     left=""
     for p in /usr/local/sbin/vps-psiphon /usr/local/sbin/vps-psiphon-run \
+             /usr/local/sbin/vps-psiphon-prestart \
              /usr/local/sbin/vps-psiphon-watchdog /etc/default/vps-psiphon \
              /etc/systemd/system/vps-psiphon.service \
              /etc/systemd/system/vps-psiphon-watchdog.service \
@@ -956,6 +1028,7 @@ After=docker.service network-online.target
 Requires=docker.service
 
 [Service]
+ExecStartPre=/usr/local/sbin/vps-psiphon-prestart
 ExecStart=/usr/local/sbin/vps-psiphon-run
 ExecStop=/usr/bin/docker stop -t 10 vps-psiphon
 Restart=always
