@@ -11,6 +11,7 @@
 #   /etc/default/vps-psiphon              parameters
 #   /usr/local/sbin/vps-psiphon-run       container launcher (systemd ExecStart)
 #   /usr/local/sbin/vps-psiphon-watchdog  liveness + burned-exit detector
+#   /usr/local/sbin/vps-psiphon-advance-region  walks REGION_POOL on each rotation
 #   /usr/local/sbin/vps-psiphon           management CLI
 #   /etc/systemd/system/vps-psiphon.service
 #   /etc/systemd/system/vps-psiphon-watchdog.service + .timer
@@ -18,8 +19,7 @@
 #   /var/log/vps-psiphon-watchdog.log     watchdog journal
 #   /var/lib/vps-psiphon-watchdog.state   watchdog counters
 #
-# `vps-psiphon uninstall` removes every one of those, plus the container and the
-# image, and finally unlinks itself: a clean uninstall leaves nothing behind.
+# `vps-psiphon uninstall` removes all of those, the container, the image and itself.
 set -euo pipefail
 
 IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
@@ -36,20 +36,15 @@ DEVICE_REGION="${DEVICE_REGION:-}"
 WATCHDOG=1
 PUBLISH_HTTP=1
 # Countries the exit must never sit in. Checked before any allow-list and in every
-# mode — including auto, where the allow-list is empty by definition and nothing
-# else looks at the country at all. RU/BY/IR/SY/CU/KP are sanctioned regions where
-# Google withholds services; CN is not sanctioned but blocks Google outright, so an
-# exit there is useless for the same reason. A false positive costs one rotation.
+# mode, including auto, where nothing else looks at the country at all. Sanctioned
+# regions, where Google withholds service, plus CN, which blocks Google itself —
+# useless for the same reason. A false positive costs one rotation.
 DENY_REGIONS_DEFAULT="RU BY IR SY CU KP CN VE"
 DENY_REGIONS=""; DENY_REGIONS_SET=0
-# Countries the exit MAY be seen in, which is a different question from the ones we
-# ask Psiphon for. GL is Google's own opinion about an address, not the server's
-# location: it rewrites many Psiphon exits to US whatever country they report, and
-# that rewrite is harmless — US is not a region Google gates the services this tool
-# exists to reach. Judging the verdict against the request therefore rotated exits
-# that were healthy and fast. Empty means the computed default: everything
-# requested, plus US. The word "any" accepts every verdict and leaves the deny-list
-# as the only country check.
+# Countries the exit MAY be seen in — a different question from the ones we ask
+# Psiphon for, because GL is Google's verdict about the address, not the server's
+# location. Empty computes to everything requested plus US; "any" accepts every
+# verdict. The reasoning sits beside ACCEPT_REGIONS in the env file below.
 ACCEPT_REGIONS=""; ACCEPT_REGIONS_SET=0
 
 CONF_DIR=/opt/vps-psiphon/config
@@ -118,9 +113,7 @@ U
 while [ $# -gt 0 ]; do
   case "$1" in
     --region)
-      # One country behaves as before. Several make a pool the watchdog walks
-      # on each rotation — a wider server choice without "auto" reaching
-      # another continent.
+      # One country as before; several form a pool the watchdog walks on rotation.
       REGION_POOL="$(printf '%s' "${2:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
       EGRESS_REGION="${REGION_POOL%% *}"
       [ "$REGION_POOL" = "$EGRESS_REGION" ] && REGION_POOL=""
@@ -157,19 +150,16 @@ command -v curl >/dev/null || die "curl is not installed"
 
 # ------------------------------------------------------------- bind address --
 # Where the SOCKS5 is published decides whether the kernel can carry it. Docker
-# writes a DNAT rule for every published port, but a loopback destination needs
-# net.ipv4.conf.all.route_localnet, which docker does not set — so that rule sits
-# at zero packets and docker-proxy copies every byte through userspace instead.
-# Measured on a live node: 0.10 of a core sustained, 0.27-0.36 at peak, and
-# exactly 0.00 once the same traffic is published on the gateway address, with
-# throughput unchanged.
+# writes a DNAT rule per published port, but a loopback destination needs
+# net.ipv4.conf.all.route_localnet, which docker does not set — so that rule stays
+# at zero packets and docker-proxy copies every byte through userspace: 0.10 of a
+# core sustained on a live node, 0.00 once the same traffic goes to the gateway.
+# Both addresses are host-private; the gateway is additionally reachable from
+# containers on the default bridge.
 #
-# The gateway is host-private either way — RFC1918, no route from outside — so
-# what this actually trades is reachability from other containers on the default
-# bridge, which loopback does not grant and the gateway does.
-# Both lookups end in `|| true`: this script runs under `set -e` with pipefail,
-# where a missing `ip` binary makes the assignment itself the failing command and
-# kills the install before it reaches the fallback it has.
+# Both lookups end in `|| true` — under `set -e` a missing `ip` binary would make
+# the assignment itself the failing command and kill the install before it reaches
+# its fallback.
 docker_gateway() {
   local g=""
   g="$(ip -4 -o addr show docker0 2>/dev/null \
@@ -186,19 +176,16 @@ if [ -z "$BIND" ]; then
 fi
 
 # --------------------------------------------------------- port arbitration --
-# Docker allocates host ports when the container starts, which is long after this
-# script has written its files and enabled its units. An unchecked collision
-# therefore does not fail the install. What it produces instead, in this order: a
-# service looping on a bind error, then two minutes of silence from the wait loop
-# below — the container is `--rm`, so every crash deletes it and `docker logs` has
-# nothing to report — and finally the closing "here is your outbound" and exit 0,
-# over a service that has never once run. Both published ports get cleared up front.
+# Docker allocates host ports when the container starts, long after this script has
+# written its files, so an unchecked collision does not fail the install: the service
+# loops on a bind error, the wait loop below sits out two minutes in silence (`--rm`
+# deletes every crash, so `docker logs` has nothing), and the run still ends with
+# "here is your outbound" and exit 0. Both published ports are cleared up front.
 #
-# Whether two binds collide is the kernel's rule, not string equality: a listener
-# on 0.0.0.0 (or ::) blocks every bind of that port, while one on a specific
-# address blocks only that address. That asymmetry is the whole bug — a bot
-# publishing 0.0.0.0:8080 collides with our 127.0.0.1:8080, which never looks
-# like a conflict if you compare addresses literally.
+# Collision is the kernel's rule, not string equality: a listener on 0.0.0.0 blocks
+# every bind of that port, one on a specific address blocks only that address — so a
+# stranger on 0.0.0.0:8080 clashes with our 127.0.0.1:8080 while the two strings
+# differ.
 #
 # Prints who holds $1 when a bind on $2 would collide; exit 0 = taken, 1 = free.
 port_conflict() {
@@ -245,19 +232,13 @@ free_port() {
   return 1
 }
 
-# Ports settled on an earlier run have to survive a reinstall, or they drift. The
-# HTTP port is the visible case: 8080 is taken, the installer moves to 8081, and on
-# the next run it starts from the 8080 default again, finds 8081 held by our own
-# still-running container, and lands on 8082 — one higher every time. SOCKS_PORT is
-# the dangerous case rather than the untidy one: it is the port the panel's outbound
-# names, so silently resetting it to the default would point the outbound at nothing.
-# An explicit --socks-port/--http-port still wins over the stored value.
-#
-# Whether the HTTP proxy is published at all is restored the same way, because
-# --no-http is a decision and a reinstall that quietly undid it would hand back a
-# port the operator had removed on purpose. What is stored is the outcome, so an
-# install where the fallback below ran out of free ports also stays unpublished —
-# --http asks for it back.
+# Ports settled on an earlier run must survive a reinstall, or they drift one higher
+# every time: 8080 taken, move to 8081, next run finds 8081 held by our own container
+# and lands on 8082. For SOCKS_PORT the stake is larger than tidiness — it is the port
+# the panel's outbound dials, so resetting it to the default would aim the outbound at
+# nothing. Whether the HTTP proxy is published is restored the same way: --no-http is a
+# decision, and what is stored is the outcome, so a run that found no free port stays
+# unpublished until --http asks for it back. An explicit flag always wins.
 if [ -r "$ENVF" ]; then
   if [ "$SOCKS_PORT_SET" = 0 ]; then
     V="$(sed -n 's/^SOCKS_PORT=//p' "$ENVF" | head -1)"; [ -n "$V" ] && SOCKS_PORT="$V"
@@ -286,9 +267,8 @@ if [ -n "$SOCKS_HOLDER" ]; then
   fi
 fi
 
-# The HTTP proxy is a convenience nothing in this setup consumes, so a busy
-# default is worth working around rather than dying on. An explicitly requested
-# port is a different matter — honour the request or refuse it, never reinterpret.
+# Nothing here consumes the HTTP proxy, so a busy default is worth working around.
+# A port named explicitly is honoured or refused, never reinterpreted.
 if [ "$PUBLISH_HTTP" = 1 ]; then
   HTTP_HOLDER="$(port_conflict "$HTTP_PORT" "$BIND" || true)"
   if [ -n "$HTTP_HOLDER" ] && [ "$HTTP_HOLDER" != "container '$NAME'" ]; then
@@ -307,10 +287,9 @@ if [ "$PUBLISH_HTTP" = 1 ]; then
   fi
 fi
 
-# Loopback exists separately inside every namespace, so 127.0.0.1 in the outbound
-# means "this container" unless xray runs on host networking. The docker0 gateway
-# has no such ambiguity — the host and every bridged container reach the same
-# address — which is the second reason it is the default.
+# Loopback exists separately in every namespace, so 127.0.0.1 in the outbound means
+# "this container" unless xray runs on host networking. The gateway is unambiguous —
+# the second reason it is the default.
 XRAY_CT="$(docker ps --format '{{.Names}}' | grep -iE 'remnanode|xray' | head -1 || true)"
 if [ -n "$XRAY_CT" ] && [ "$BIND" = "127.0.0.1" ]; then
   NETMODE="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$XRAY_CT" 2>/dev/null || echo '?')"
@@ -325,11 +304,10 @@ if [ -n "$XRAY_CT" ] && [ "$BIND" = "127.0.0.1" ]; then
 fi
 
 if [ -z "$DEVICE_REGION" ]; then
-  # ifconfig.co answers datacenter IPs with a Cloudflare challenge, so it cannot
-  # be the only source. Try a few, take the first plausible country code.
-  # -4 is deliberate: on a dual-stack host an unflagged curl prefers the AAAA, so
-  # it would report the country of the v6 address while the tunnel this setting
-  # configures leaves over IPv4. Probe the address that actually carries it.
+  # ifconfig.co answers datacenter IPs with a Cloudflare challenge, so try several and
+  # take the first plausible code. -4 is deliberate: unflagged, curl prefers the AAAA
+  # on a dual-stack host and would report the country of an address the traffic does
+  # not leave from.
   for probe in https://ipinfo.io/country \
                https://api.country.is \
                https://ifconfig.co/country-iso ; do
@@ -345,9 +323,8 @@ say "image=$IMAGE  egress=${EGRESS_REGION:-auto}  device=$DEVICE_REGION  socks=$
 
 # ------------------------------------------------------------------ install --
 mkdir -p "$CONF_DIR"
-# Reinstalling with a different --region must actually change the region. The
-# image seeds /config once and then ignores EGRESS_REGION, so a stale config
-# would silently keep the old country.
+# The image seeds /config once and then ignores EGRESS_REGION, so a stale config
+# would silently keep the old country across a --region change.
 OLD_REGION="__none__"
 [ -r "$ENVF" ] && OLD_REGION="$(sed -n 's/^EGRESS_REGION=//p' "$ENVF")"
 if [ "$OLD_REGION" != "__none__" ] && [ "$OLD_REGION" != "$EGRESS_REGION" ]; then
@@ -359,8 +336,8 @@ chown -R 1000:1000 "$CONF_DIR"
 # Preserve operator-set values across a reinstall.
 OLD_OK_REGIONS=""; OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""
 OLD_FAIL_WINDOW=""; OLD_GRACE=""; OLD_ACCEPT_REGIONS=""
-# Tracked as set-or-not rather than by value: a deliberately emptied deny-list is a
-# real choice, and must not be undone by the default on the next reinstall.
+# Tracked as set-or-not, not by value: a deliberately emptied deny-list is a choice
+# the next reinstall must not undo.
 OLD_DENY_SET=0; OLD_DENY_REGIONS=""
 if [ -r "$ENVF" ] && grep -q '^DENY_REGIONS=' "$ENVF"; then
   OLD_DENY_SET=1
@@ -382,28 +359,25 @@ if [ -r "$ENVF" ]; then
   [ "$ACCEPT_REGIONS_SET" = 1 ] || ACCEPT_REGIONS="$OLD_ACCEPT_REGIONS"
 fi
 
-# Checked here rather than earlier: the pool is only known once it has been either
-# given on the command line or restored from the env file just above.
-# A country that is both requested and denied would rotate forever — every rotation
-# lands somewhere the deny-list rejects on the very next check.
+# Checked here because the pool is only known once given or restored just above. A
+# country both requested and denied rotates forever — every rotation lands somewhere
+# the deny-list rejects on the next check.
 for r in ${EGRESS_REGION:-} ${REGION_POOL:-}; do
   case " $DENY_REGIONS " in
     *" $r "*) say "!! '$r' is both requested and denied — every exit there will be rejected" ;;
   esac
 done
-# The deny-list is checked first, so an overlap is not ambiguous — it is just a
-# line that never does what its author meant.
+# Deny is checked first, so an overlap is not ambiguous — just a line that never does
+# what its author meant.
 for r in ${ACCEPT_REGIONS:-}; do
   case " $DENY_REGIONS " in
     *" $r "*) say "!! '$r' is both accepted and denied — denied wins, it is checked first" ;;
   esac
 done
 
-# A reinstall that moved the published address without saying so would leave the
-# outbound dialing an address nobody listens on — a tunnel that reads healthy in
-# every check and carries nothing. The installer cannot repair that itself: the
-# outbound lives in the panel, out of its reach. So it says so here, and again
-# beside the new outbound at the end, where it cannot be scrolled past.
+# A moved address leaves the outbound dialing one nobody listens on — a tunnel that
+# reads healthy in every check and carries nothing. The outbound lives in the panel,
+# out of this script's reach, so it warns here and again beside the new outbound.
 OLD_BIND=""
 [ -r "$ENVF" ] && OLD_BIND="$(sed -n 's/^BIND=//p' "$ENVF")"
 BIND_CHANGED=0
@@ -428,12 +402,11 @@ PUBLISH_HTTP=$PUBLISH_HTTP
 EGRESS_REGION=$EGRESS_REGION
 DEVICE_REGION=$DEVICE_REGION
 CONF_DIR=$CONF_DIR
-# watchdog tuning. FAIL_THRESHOLD failures within the last FAIL_WINDOW checks
-# rotate the tunnel — a window, not a run of consecutive failures. A tunnel that is
-# merely degraded does not fail every check: it alternates around the floor, and a
-# counter that resets on the first passing check never reaches the threshold. Seen
-# on a live node — four failures inside 70 minutes and no rotation, because a
-# passing check sat between every pair of them.
+# watchdog tuning. FAIL_THRESHOLD failures within the last FAIL_WINDOW checks rotate
+# the tunnel — a window, not a run of consecutive failures: a degraded tunnel
+# alternates around the floor instead of failing outright, and a counter that resets
+# on the first passing check never reaches the threshold. Seen on a live node — four
+# failures inside 70 minutes and no rotation.
 FAIL_THRESHOLD=2
 FAIL_WINDOW=${OLD_FAIL_WINDOW:-5}
 ROTATE_COOLDOWN=1800
@@ -441,66 +414,54 @@ ROTATE_COOLDOWN=1800
 # NOTE: this file is sourced by the shell, so any value containing spaces MUST be
 # quoted. Unquoted, everything after the first space is run as a command.
 #
-# Acceptable countries for Google's verdict when no region is pinned:
+# Acceptable countries for Google's verdict in auto mode, when no region is pinned:
 #   OK_REGIONS='DE NL JP'
-# Ignored while EGRESS_REGION is set — then the verdict must equal that region.
+# Ignored once EGRESS_REGION or REGION_POOL is set — the verdict is then judged
+# against ACCEPT_REGIONS below.
 OK_REGIONS=$OLD_OK_REGIONS
-# Countries the exit must NEVER be in, space separated. Checked before the allow-
-# list and in every mode: with no EGRESS_REGION and no OK_REGIONS this is the only
-# country check that runs at all. Sanctioned regions are where Google withholds
-# service, which is the failure this tool exists to escape — so a false positive
-# costs one rotation and a miss costs the service. Empty disables it.
+# Countries the exit must NEVER be in, space separated. Checked before the allow-list
+# and in every mode: with no EGRESS_REGION and no OK_REGIONS this is the only country
+# check that runs at all. Those regions are where Google withholds service, the very
+# failure this tool exists to escape — a false positive costs one rotation, a miss
+# costs the service. Empty disables it.
 DENY_REGIONS='$DENY_REGIONS'
-# Minimum throughput, KB/s, measured on the watchdog's own YouTube fetch — no extra
-# traffic. Below this on FAIL_THRESHOLD of the last FAIL_WINDOW checks, the tunnel is
-# rotated: Psiphon picks a server per tunnel, and a bad pick otherwise persists
-# indefinitely while liveness and country both read green. 0 disables the gate.
+# Minimum throughput, KB/s, read off the watchdog's own YouTube fetch — no extra
+# traffic. Below this on FAIL_THRESHOLD of the last FAIL_WINDOW checks the tunnel is
+# rotated: Psiphon picks its server per tunnel, so a bad pick otherwise persists while
+# liveness and country both read green. 0 disables the gate.
 #
-# One floor for every node, on purpose. A number fitted by hand to each machine is a
-# number nobody can reason about six months later, and this installer ships exactly
-# one of them. It belongs where the SLOWEST node still clears it comfortably, and the
-# way to find it is to replay each node's own logged history through the window rule
-# above and count the rotations it would have caused. Three nodes, ~40 hours each,
-# medians 1765 / 1987 / 3079 KB/s: at 800 the replay fires on none of them, at 1000 it
-# fires twice on the slowest, at 1200 five times. Raising it buys nothing either — a
-# real collapse (66-128 KB/s, measured while a healthy tunnel on the same box read
-# 1500) is caught on the second check at 600, at 800 and at 1000 alike. So 800: about
-# 45% of the slowest node's median, and far enough under every node's normal band to
-# stay silent while it is healthy. What made the old default of 100 useless was not
-# its precision but its distance from reality — a working tunnel reads in the
-# thousands, so a fifteen-fold collapse stayed below every alarm for over an hour.
+# One floor for every node, on purpose: a number fitted by hand per machine is one
+# nobody can reason about six months later. 800 came from replaying three nodes' own
+# logged history (medians 1765 / 1987 / 3079 KB/s) through the window rule above — at
+# 800 none of them would have rotated, at 1000 the slowest twice, at 1200 five times.
+# Raising it buys nothing: a real collapse (66-128 KB/s while a healthy tunnel on the
+# same box read 1500) trips the gate on the second check at 600 and at 1000 alike. The
+# old default of 100 never fired at all, a working tunnel reading in the thousands.
 #
-# Change it for a node that genuinely cannot reach it — and replay \`grep throughput\`
-# from that node's watchdog log before concluding that it cannot.
+# Lower it for a node that genuinely cannot reach it — after replaying that node's own
+# throughput history from the watchdog log, not on one bad reading.
 MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-800}
-# Seconds after the container starts during which the throughput gate is skipped. A
+# Seconds after a container start during which the throughput gate is skipped. A
 # freshly dialled tunnel is still ramping while every client the restart cut loose
 # reconnects at once: the first check after a rotation read 73 KB/s on a tunnel that
-# settled at 1500 a few minutes later. Judging that reading would rotate a healthy
-# tunnel away and start the same race again. Liveness and country are still checked.
-#
-# It has to be LONGER than the gap between checks, or it protects nothing: the timer
-# fires every 10 minutes, so with the 300 it shipped with, the one reading it existed
-# to excuse — the first after a restart — always landed outside it, and across three
-# nodes it never once applied. At 900 that check is skipped and the next one, twenty
-# minutes into the tunnel's life, is judged normally.
+# settled at 1500 a few minutes later, and judging it rotates a healthy tunnel
+# away. It must be LONGER than the gap between checks or it protects nothing — the
+# timer fires every 10 minutes, and the 300 this shipped with never once applied
+# across three nodes. Liveness and country are still checked.
 THROUGHPUT_GRACE_SEC=${OLD_GRACE:-900}
-# Countries to rotate through, space separated. Empty = stay in EGRESS_REGION and
-# only change server within it. A pool is what you want when one country is busy:
-# each rotation advances to the next entry, so the retry draws on a different
-# country's servers instead of the same crowded set. Keep them near each other —
-# the pool is also what stops the watchdog calling a legitimate exit "wrong
-# country", so anything you list here you are accepting as a destination.
+# Countries to rotate through, space separated. Empty = stay in EGRESS_REGION and only
+# change server within it. Each rotation advances one entry, so a retry draws on a
+# different country's servers instead of the same crowded set. Keep them near each
+# other, and note the pool also feeds what the watchdog accepts: everything listed here
+# you are accepting as a destination.
 REGION_POOL='$REGION_POOL'
-# Countries Google's verdict is allowed to report — deliberately NOT the same list
-# as REGION_POOL. The pool is what Psiphon is asked for; this is what is accepted
-# once Google has had its say about the address it handed us, and the two differ in
-# practice: Google rewrites many Psiphon exits to US no matter what country the
-# server reports, so judging its verdict against the request rotated exits that
-# were healthy and fast. Empty means the computed default, which is everything
-# requested (REGION_POOL, plus EGRESS_REGION when it was pinned outside the pool)
-# plus US. The word any accepts every verdict and leaves DENY_REGIONS as the only
-# country check. Sanctioned regions are rejected either way: deny is checked first.
+# Countries Google's verdict may report — deliberately NOT the same list as
+# REGION_POOL. The pool is what Psiphon is asked for; this is what is accepted once
+# Google has had its say about the address it handed us, and the two differ: Google
+# rewrites many Psiphon exits to US whatever country the server reports, so judging the
+# verdict against the request rotated healthy, fast exits away. Empty means the
+# computed default — everything requested, plus US. The word any accepts every verdict.
+# Sanctioned regions are rejected either way: deny is checked first.
 ACCEPT_REGIONS='$ACCEPT_REGIONS'
 EOF
 chmod 600 "$ENVF"
@@ -517,13 +478,11 @@ cat > /usr/local/sbin/vps-psiphon-run <<'RUN'
 set -euo pipefail
 . /etc/default/vps-psiphon
 docker rm -f "$NAME" >/dev/null 2>&1 || true
-# NOTE: the BIND prefix is load-bearing. Publishing without it exposes an OPEN
-# SOCKS5 PROXY to the internet — psiphon binds 0.0.0.0 inside the container.
-# Both values this installer picks on its own are host-private (loopback, or the
-# docker0 gateway). A --bind you typed yourself is honoured exactly as given, a
-# wildcard or a public address included: that is a deliberate choice, and nothing
-# here second-guesses it. What such an address publishes is an unauthenticated
-# proxy, so the access control in front of it is yours to add.
+# NOTE: the BIND prefix is load-bearing. Publishing without it exposes an OPEN SOCKS5
+# PROXY to the internet — psiphon binds 0.0.0.0 inside the container. Both addresses
+# this installer picks on its own are host-private; a --bind you typed yourself is
+# honoured as given, a public one included, and the access control it then needs is
+# yours to add.
 PUB=( -p "${BIND}:${SOCKS_PORT}:${SOCKS_PORT}" )
 # Default to publishing it, so env files written before this was an option keep
 # their old behaviour instead of silently losing the HTTP proxy.
@@ -542,17 +501,15 @@ chmod 755 /usr/local/sbin/vps-psiphon-run
 cat > /usr/local/sbin/vps-psiphon-advance-region <<'ADV'
 #!/usr/bin/env bash
 # Advance EGRESS_REGION to the next country in REGION_POOL and apply it. Prints
-# "old -> new" when it changes anything, and stays silent when there is no pool.
+# "old -> new" when it changes anything, silent when there is no pool.
 #
-# Rotating within one country retries that country's servers — exactly the set
-# that is exhausted when it is busy. Walking a pool draws on a different country
-# instead, without handing the choice to "auto", which may answer from another
-# continent.
+# Rotating within one country retries exactly the servers that are exhausted when it
+# is busy; walking a pool draws on another country instead, without handing the choice
+# to "auto", which may answer from another continent.
 #
-# The region is applied by rewriting psiphon.config in place: the image seeds that
-# file only when it is absent, so the edit sticks. That is deliberately gentler
-# than the `region` subcommand, which wipes the config directory and throws away
-# the client's cached server list along with it.
+# Applied by rewriting psiphon.config in place — the image seeds that file only when
+# absent, so the edit sticks. Deliberately gentler than the `region` subcommand, which
+# wipes the config directory and the client's cached server list with it.
 set -uo pipefail
 ENVF=/etc/default/vps-psiphon
 [ -r "$ENVF" ] && . "$ENVF"
@@ -581,42 +538,29 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 # Rotation triggers, in order of how certain they are:
 #   1. tunnel dead    — SOCKS does not answer.
 #   2. denied country — Google places this exit in a sanctioned or Google-blocked
-#      region. Checked before everything below and in EVERY mode: under auto with no
-#      OK_REGIONS the allow-list judges nothing, which is precisely when a sanctioned
-#      exit would go unnoticed. Allow-list and deny-list are not alternatives — the
-#      set of acceptable countries is closed and short, the set of dangerous ones is
-#      open, so the second has to be named and checked unconditionally.
-#   3. wrong country  — Google's own verdict about this exit does not match the region
-#      we asked for. YouTube publishes that verdict in its page source as "GL":"XX".
-#      This is the failure that makes Cloudflare WARP unusable for region-gated
-#      services: WARP geolocates back to the client's real country, so they refuse.
-#      Not every mismatch weighs the same: Psiphon is used mostly from America, so
-#      Google has reclassified many of its exits as US — harmless in practice. It is
-#      a rewrite to a sanctioned region that breaks the service, hence trigger 2.
-#   4a. stalled tunnel — SOCKS answers the liveness probe, yet no HTTP request through
-#      the tunnel completes. Rated by the absence of a response, not by its size, so a
-#      captcha page (small, but a response) is never mistaken for a stall.
-#   4. slow tunnel    — the exit answers from the right country but carries almost
+#      region. Checked first and in EVERY mode: under auto with no OK_REGIONS the
+#      allow-list judges nothing, which is precisely when a sanctioned exit would go
+#      unnoticed. The two lists are not alternatives — acceptable countries are a
+#      closed, short set, dangerous ones an open one, so the latter is named and
+#      checked unconditionally.
+#   3. wrong country  — Google's verdict about this exit, published in YouTube's page
+#      source as "GL":"XX", is not one we accept. This is what makes Cloudflare WARP
+#      unusable for region-gated services: WARP reads back as the client's own
+#      country. Not every mismatch weighs the same — Psiphon is used mostly from
+#      America, so Google has reclassified many of its exits as US, which is harmless;
+#      a rewrite to a sanctioned region is trigger 2.
+#   4. stalled tunnel — SOCKS answers the liveness probe, yet no HTTP request through
+#      the tunnel completes. Judged by the ABSENCE of a response, never by its size,
+#      so a captcha page is not mistaken for a stall.
+#   5. slow tunnel    — the exit answers from an accepted country but carries almost
 #      nothing. Psiphon picks its server per tunnel, so a bad pick stays until
-#      something forces a reconnect, while liveness and country both stay green
-#      throughout — without this gate a 30-90x throughput collapse is invisible.
-#      Measured on the YouTube fetch below, so it costs no extra traffic. Two things
-#      decide whether the gate ever fires: a floor set as a fraction of what this
-#      node gets rather than just above zero, and counting failures over a window,
-#      because a degraded tunnel alternates across the floor instead of staying
-#      under it. The gate is skipped for THROUGHPUT_GRACE_SEC after a start, while
-#      the tunnel is still ramping.
+#      something forces a reconnect while liveness and country read green throughout;
+#      without this gate a 30-90x collapse is invisible. Measured on the YouTube fetch
+#      below, and skipped for THROUGHPUT_GRACE_SEC after a start while the tunnel is
+#      still ramping.
 #
-# Google's /sorry captcha is recorded but never rotates on its own: a human solves
-# one in seconds, and churning the tunnel over it costs more than it saves.
-#
-# A correct country is necessary, not sufficient. GL is Google's opinion about the
-# ADDRESS, and it can disagree with the geo-restrictions Google enforces on that same
-# address: an exit reading as the right country is still refused now and then. What
-# tells you it is the address and not your account is that an account-level
-# restriction follows you from exit to exit, while this one disappears the moment the
-# exit changes. No unauthenticated probe sees it, so it is a human's to notice and
-# `vps-psiphon rotate`'s to fix.
+# Google's /sorry captcha is recorded but never rotates on its own: a human solves one
+# in seconds, and churning the tunnel over it costs more than it saves.
 set -uo pipefail
 . /etc/default/vps-psiphon
 LOG=/var/log/vps-psiphon-watchdog.log
@@ -644,8 +588,8 @@ if [ "$alive" = 0 ]; then
 else
   # One fetch serves two checks: the country verdict and how fast it arrived.
   ytf="$(mktemp)"
-  # The status code is read alongside the rate because the two failures below are told
-  # apart by whether an HTTP transaction completed at all, not by how big it was.
+  # The status code is read alongside the rate: the two failures below are told apart
+  # by whether an HTTP transaction completed at all, not by how big it was.
   probe="$(LC_ALL=C curl -s --max-time 25 "${S[@]}" -H 'Accept-Language: en-US' \
            -o "$ytf" -w '%{speed_download} %{http_code}' https://www.youtube.com/ 2>/dev/null || echo '0 000')"
   spd="${probe%% *}"; ytcode="${probe##* }"
@@ -654,34 +598,27 @@ else
   rm -f "$ytf"
   kbps=$(( ${spd%%.*} / 1024 ))
   if [ -n "$gl" ]; then
-    # The deny-list runs first, and it is the only one of these checks that runs in
-    # every mode. Under auto with no OK_REGIONS the allow-list below is empty by
-    # definition and judges nothing — which is precisely when an exit in a
-    # sanctioned region would otherwise go unnoticed for hours.
+    # Deny runs first and in every mode: under auto with no OK_REGIONS the allow-list
+    # below is empty by definition and judges nothing.
     denied=0
     case " ${DENY_REGIONS:-} " in
       *" $gl "*) reason="denied-country (Google sees $gl — sanctioned or Google-blocked)"; denied=1 ;;
     esac
-    # What we ASK Psiphon for and what we ACCEPT from Google are two different
-    # lists, and conflating them was a real cost: GL is Google's opinion about an
-    # address, not the server's location, and it rewrites many Psiphon exits to US
-    # whatever country they report — so a fast, healthy FR exit seen as US was
-    # rotated away for nothing. ACCEPT_REGIONS holds the verdicts tolerated.
+    # What we ASK Psiphon for and what we ACCEPT from Google are different lists:
+    # Google rewrites many exits to US whatever country they report, so judging the
+    # verdict against the request rotated a fast, healthy FR exit away for nothing.
     if [ "$denied" = 0 ]; then
       acc="${ACCEPT_REGIONS:-}"
       if [ -z "$acc" ]; then
         if [ -n "${REGION_POOL:-}${EGRESS_REGION:-}" ]; then
-          # Everything requested — the pool, plus a region pinned outside it by
-          # hand, which the watchdog must not then reject — and US, the one
-          # rewrite known to be harmless. Deduplicated so the log line stays
-          # readable, since EGRESS_REGION is normally already in the pool.
+          # Everything requested — the pool, plus a region pinned outside it by hand
+          # — and US, the one harmless rewrite. Deduplicated for the log line.
           for r in ${REGION_POOL:-} ${EGRESS_REGION:-} US; do
             case " $acc " in *" $r "*) ;; *) acc="${acc:+$acc }$r" ;; esac
           done
         else
-          # Auto with an operator-set allow-list behaves as it always did; auto
-          # with neither leaves the deny-list as the only country check, which is
-          # that mode's documented behaviour.
+          # Auto with an operator-set allow-list behaves as always; auto with neither
+          # leaves the deny-list as the only country check, as documented.
           acc="${OK_REGIONS:-}"
         fi
       fi
@@ -693,26 +630,23 @@ else
       fi
     fi
   fi
-  # Throughput gate. A truncated fetch is itself the symptom, so a partial download
-  # still counts, but it needs enough bytes for the rate to mean anything. Rotating
-  # drops every live client connection, so this only fires through FAIL_THRESHOLD
-  # consecutive checks and the rotate cooldown.
-  # Age of the tunnel, so a rate measured while it is still ramping is recorded but
-  # not judged. An unknown age (no docker, renamed container) reads as old rather
-  # than young: the gate is what protects the service, and disabling it on a failed
-  # lookup would be the worse of the two mistakes.
+  # Throughput gate. A truncated fetch is itself a symptom, so a partial download still
+  # counts once it carries enough bytes for a rate to mean anything. Rotating drops
+  # every live client connection, hence the failure window and the cooldown below.
+  #
+  # Tunnel age, so a rate measured while it is still ramping is recorded but not
+  # judged. An unknown age (no docker, renamed container) reads as old rather than
+  # young: disabling the gate on a failed lookup is the worse of the two mistakes.
   up_for=999999
   started="$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-vps-psiphon}" 2>/dev/null)"
   [ -n "$started" ] && up_for=$(( $(date +%s) - $(date -d "$started" +%s 2>/dev/null || echo 0) ))
   # A tunnel that completes no HTTP transaction at all, seconds after SOCKS answered
-  # the liveness probe, is broken — and until now that read as perfectly healthy: the
-  # rate gate needs 50 KB before a rate means anything, so a zero-byte fetch fell
-  # straight through it and was logged as "0 KB/s" with no verdict. Judged strictly by
-  # the ABSENCE of a response, never by a small one: Google's captcha is a small
-  # response, and rotating on a captcha is deliberately not wanted.
-  # Named apart from the liveness probe's own `code` on purpose: the two live in the
-  # same function and mean different things, and reusing the name would make the next
-  # edit that reorders them fail silently.
+  # the liveness probe, is broken — and it used to read as healthy, since a zero-byte
+  # fetch falls straight through the 50 KB rate gate below and logs "0 KB/s" with no
+  # verdict. Judged by the ABSENCE of a response, never by a small one: a captcha is a
+  # small response, and rotating on a captcha is deliberately not wanted. `ytcode` is
+  # named apart from the liveness probe's `code` so that reordering them cannot pass
+  # silently.
   if [ -z "$reason" ] && [ "$ytcode" = "000" ]; then
     reason="stalled-tunnel (no HTTP response in 25s while SOCKS answered)"
   fi
@@ -736,19 +670,18 @@ else
   captcha="$now_captcha"
 fi
 
-# Failures are counted over a window of recent checks. A run of consecutive ones is
-# the wrong unit: the tunnel that most needs rotating is the one that is degraded
-# rather than dead, and that one passes every other check — which reset the counter
-# to zero and put the rotation permanently out of reach.
+# Failures are counted over a window of recent checks. Consecutive ones are the wrong
+# unit: the tunnel that most needs rotating is degraded rather than dead, and it passes
+# every other check — which reset the counter and put rotation out of reach.
 if [ -z "$reason" ]; then
   [ "$fails" -gt 0 ] && log "recovered (exit $(curl -s --max-time 15 "${S[@]}" https://api.ipify.org 2>/dev/null), country ${gl:-?})"
   window="${window}0"
 else
   window="${window}1"
 fi
-# Trimmed only when it is already longer than the window: a negative offset larger
-# than the string is not a no-op in bash, it yields the empty string — which would
-# silently forget every failure until five checks had accumulated.
+# Trimmed only when already longer than the window: in bash a negative offset larger
+# than the string yields the EMPTY string, not the whole of it — which would silently
+# forget every failure until the window had filled.
 [ "${#window}" -gt "${FAIL_WINDOW:-5}" ] && window="${window: -${FAIL_WINDOW:-5}}"
 ones="${window//0/}"; fails="${#ones}"
 [ -n "$reason" ] && log "check failed ($reason), $fails of the last ${#window} checks"
@@ -777,9 +710,9 @@ touch /var/log/vps-psiphon-watchdog.log
 cat > /usr/local/sbin/vps-psiphon <<'CLI'
 #!/usr/bin/env bash
 set -uo pipefail
-# Sourced defensively. Once the env file is gone — a half-finished uninstall, a
-# hand-deleted file — `set -u` would abort on the first unset variable and leave
-# the CLI unable to clean up after itself. The defaults keep every branch usable.
+# Sourced defensively: once the env file is gone — a half-finished uninstall, a
+# hand-deleted file — `set -u` would abort on the first unset variable and leave the
+# CLI unable to clean up after itself.
 [ -r /etc/default/vps-psiphon ] && . /etc/default/vps-psiphon
 IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
 NAME="${NAME:-vps-psiphon}"
@@ -851,13 +784,13 @@ case "${1:-status}" in
     moved="$(/usr/local/sbin/vps-psiphon-advance-region 2>/dev/null)"
     [ -n "$moved" ] && echo "region    : $moved"
     systemctl restart vps-psiphon.service; sleep 45
-    # advance-region rewrote the env file. Without re-reading it, the status below
-    # judges the new exit against the region we just left and calls it a mismatch.
+    # advance-region rewrote the env file; without re-reading it, status would judge
+    # the new exit against the region we just left.
     [ -r /etc/default/vps-psiphon ] && . /etc/default/vps-psiphon
     status ;;
   pool)
-    # An empty string is a valid argument here — it clears the pool — so this
-    # tests for a MISSING argument, not an empty one.
+    # An empty string is valid here — it clears the pool — so this tests for a
+    # MISSING argument, not an empty one.
     [ $# -ge 2 ] || { echo "usage: vps-psiphon pool '<CC CC …>'   (empty string clears it)"; exit 1; }
     np="$(printf '%s' "$2" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
     sed -i "s/^REGION_POOL=.*/REGION_POOL='$np'/" /etc/default/vps-psiphon
@@ -873,8 +806,7 @@ case "${1:-status}" in
       echo "pool cleared — rotations stay in ${EGRESS_REGION:-auto}"
     fi ;;
   accept)
-    # An empty string is a valid argument — it restores the computed default — so
-    # this tests for a MISSING argument, not an empty one.
+    # An empty string is valid here too — it restores the computed default.
     [ $# -ge 2 ] || { echo "usage: vps-psiphon accept '<CC CC …>|any'   (empty string restores the default)"; exit 1; }
     na="$(printf '%s' "$2" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
     sed -i "s/^ACCEPT_REGIONS=.*/ACCEPT_REGIONS='$na'/" /etc/default/vps-psiphon
@@ -892,8 +824,8 @@ case "${1:-status}" in
     r="$2"; [ "$r" = auto ] && r=""
     sed -i "s/^EGRESS_REGION=.*/EGRESS_REGION=$r/" /etc/default/vps-psiphon
     EGRESS_REGION="$r"   # the file was sourced at startup; keep status() honest
-    # The image only seeds /config on first run; an existing psiphon.config
-    # silently keeps the OLD region. Wipe it or the change is a no-op.
+    # The image seeds /config on first run only; an existing psiphon.config keeps the
+    # OLD region silently, so wipe it or the change is a no-op.
     rm -rf "${CONF_DIR:?}"/*; mkdir -p "$CONF_DIR"; chown -R 1000:1000 "$CONF_DIR"
     systemctl restart vps-psiphon.service; sleep 45; status ;;
   speed)
@@ -916,16 +848,16 @@ case "${1:-status}" in
           /etc/systemd/system/vps-psiphon-watchdog.timer
     systemctl daemon-reload
     systemctl reset-failed vps-psiphon.service vps-psiphon-watchdog.service >/dev/null 2>&1
-    # The installer pulled this image and a reinstall pulls it again, so it is ours
-    # to drop. Docker refuses if anything else still references it — that is fine.
+    # Ours to drop: the installer pulled it and a reinstall pulls it again. Docker
+    # refuses while anything else references it, which is fine.
     docker image rm "$IMAGE" >/dev/null 2>&1
     rm -f /usr/local/sbin/vps-psiphon-run /usr/local/sbin/vps-psiphon-watchdog \
           /usr/local/sbin/vps-psiphon-advance-region \
           /etc/default/vps-psiphon /var/lib/vps-psiphon-watchdog.state \
           /var/log/vps-psiphon-watchdog.log /tmp/vpspsi.speed
     rm -rf /opt/vps-psiphon
-    # Unlinking the running script is safe: bash holds an open descriptor on the
-    # inode, so the rest of this branch keeps executing after the name is gone.
+    # Safe to unlink while running: bash holds the inode open, so the rest of this
+    # branch keeps executing after the name is gone.
     rm -f /usr/local/sbin/vps-psiphon
     # Claiming "removed" is worth nothing unmeasured — look at the disk and say so.
     left=""
@@ -998,12 +930,11 @@ systemctl restart vps-psiphon.service
 
 # ------------------------------------------------------------------- verify --
 say "waiting for the tunnel"
-# Watch the unit, not just the log. Restart=always means a container that cannot
-# start does not stay dead quietly — it loops, and this loop used to wait out all
-# sixty iterations against a container that `--rm` had already deleted: no output,
-# no error, ~2 minutes, then a success-shaped ending and exit 0. systemd reports an
-# auto-restarting unit as "activating", so anything other than "active" here is the
-# failure — caught in one iteration, ~3 s in practice.
+# Watch the unit, not just the log. Restart=always means a container that cannot start
+# loops rather than dying quietly, and this loop used to wait out all sixty iterations
+# against a container `--rm` had already deleted — no output, no error, then a
+# success-shaped exit 0. systemd reports an auto-restarting unit as "activating", so
+# anything but "active" here is the failure, caught in ~3 s.
 TUNNEL_UP=0
 for i in $(seq 1 60); do
   systemctl is-active --quiet vps-psiphon.service || break
@@ -1016,7 +947,7 @@ if [ "$TUNNEL_UP" = 0 ] && ! systemctl is-active --quiet vps-psiphon.service; th
   printf '\033[1;31mERROR:\033[0m the tunnel never started.\n' >&2
   journalctl -u vps-psiphon.service -n 40 --no-pager 2>/dev/null \
     | grep -iE 'error|failed|cannot|denied' | tail -5 | sed 's/^/    /' >&2
-  # Stop it rather than leave docker being hammered every 10s while you read this.
+  # Stop it rather than leave docker hammered every 10s while you read this.
   systemctl stop vps-psiphon.service >/dev/null 2>&1 || true
   echo >&2
   echo "    The service is stopped, not looping. Fix the cause and re-run this" >&2
