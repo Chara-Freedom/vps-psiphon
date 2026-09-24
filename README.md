@@ -85,8 +85,7 @@ Requires root, docker and curl.
 | `--http-port N` | 8080 | HTTP proxy port |
 | `--no-http` | — | do not publish the HTTP proxy at all; remembered across reinstalls |
 | `--http` | — | publish it after all — undoes a stored `--no-http` |
-| `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked in every mode. Empty disables it |
-| `--accept 'CC…'` | everything requested, plus `US` | countries Google's verdict may report — *not* the same question as which countries to ask for. `any` accepts every verdict and leaves the deny-list as the only country check |
+| `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked first, in every mode. Empty disables it |
 | `--bind ADDR` | docker0 gateway | host address the ports are published on |
 | `--bind-loopback` | — | publish on `127.0.0.1` instead of the gateway |
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
@@ -195,11 +194,10 @@ measured.
 ## Managing it
 
 ```
-vps-psiphon                 state: region, exit IP, Google's country verdict, Gemini's answer, traffic
+vps-psiphon                 state: region, server's country, exit IP, Google's verdict, Gemini's answer, traffic
 vps-psiphon rotate          fresh tunnel → different exit IP
 vps-psiphon region JP       change exit country
 vps-psiphon pool 'DE NL FR' countries to rotate through ('' clears it)
-vps-psiphon accept 'DE US'  verdicts to tolerate ('' restores the default)
 vps-psiphon speed           50 MB single stream + 4 streams aggregate
 vps-psiphon logs [n]        Psiphon client log
 vps-psiphon watchdog [n]    watchdog journal
@@ -227,21 +225,15 @@ Six rotation triggers, in order of how certain they are:
 
 1. **tunnel dead** — SOCKS does not answer.
 2. **denied country** — Google places the exit in a sanctioned or Google-blocked
-   region (`DENY_REGIONS`, default `RU BY IR SY CU KP CN VE`). This is the only
-   country check that runs in *every* mode: with no pinned region and no
-   `OK_REGIONS`, the allow-list below is empty by definition and judges nothing —
-   which is exactly when an exit in a sanctioned region would sit there unnoticed.
-   The two lists are not alternatives. The set of acceptable countries is closed and
-   short, so an allow-list handles a pinned region well; the set of dangerous ones is
-   open, which is why it is worth naming them separately and checking them always.
-3. **wrong country** — Google's verdict about the exit is not one of the countries
-   you accept (`ACCEPT_REGIONS`, default: everything requested plus `US`). This is
-   deliberately a different list from the one you ask for. `GL` is Google's opinion
-   about an *address*, not the server's location, and it rewrites many Psiphon exits
-   to `US` whatever country they report — so judging the verdict against the request
-   rotated exits that were fast and healthy. `US` is in the default because Google
-   gates none of the services this tool exists to reach behind it; a verdict of, say,
-   `SG` still rotates, because that one costs latency.
+   region (`DENY_REGIONS`, default `RU BY IR SY CU KP CN VE`). Checked first, in
+   every mode.
+3. **country mismatch** — Google's verdict about the exit (`GL`) is not the country
+   Psiphon reports for the server it connected to. Google has reclassified that
+   address, and such exits break Google's AI services — see
+   [A mismatch, not a country](#a-mismatch-not-a-country). There is no list of
+   acceptable verdicts: the fault is the disagreement itself, and an exit where both
+   sides say the same country works, whichever country it is. If either side cannot
+   be read, nothing is judged.
 4. **stalled tunnel** — SOCKS answers the liveness probe, but no HTTP request through
    the tunnel completes at all. Judged by the absence of a response rather than its
    size, so Google's captcha — small, but a response — is never read as a stall.
@@ -301,10 +293,8 @@ vps-psiphon pool 'DE NL FR AT'                 # or set it later
 vps-psiphon pool ''                            # back to a single fixed country
 ```
 
-The pool doubles as the country check's allow-list — anything you list is accepted
-as a destination, so keep it to countries you actually want to be seen from and
-that are near enough not to cost you the latency. Empty (the default) leaves
-behaviour exactly as it was: rotations stay in `EGRESS_REGION`.
+Keep the pool to countries near enough not to cost you the latency. Empty (the
+default) keeps rotations in `EGRESS_REGION`.
 
 The region is applied by rewriting `psiphon.config` in place. The image seeds that
 file only when it is absent, so the edit sticks — and the client keeps its cached
@@ -356,12 +346,14 @@ SOCKS tunnel, so they see the exit's own address and nothing else.
 
 The consequence is therefore narrow and specific: **services gated on Google's view
 refuse a WARP exit, while services with honest IP geolocation are unaffected.**
-Psiphon is consistent across both — asking for JP, NL or DE yields exactly `JP`,
-`NL`, `DE` from Google and from the geolocation services alike.
+Psiphon is mostly consistent across both — most exits come back as the country asked
+for, from Google and from the geolocation services alike. The ones that do not are
+the subject of [A mismatch, not a country](#a-mismatch-not-a-country).
 
-**`GL` is YouTube's verdict — and only YouTube's.** Force `-4` and take it at face
-value for YouTube. It says nothing reliable about Gemini, which runs a geo-check of its
-own; that is the next section.
+**`GL` is YouTube's verdict.** Force `-4` and take it at face value for YouTube. A `GL`
+that agrees with the server's country says nothing reliable about Gemini, which runs a
+geo-check of its own — that is the next section; a `GL` that disagrees is a sign of
+trouble for all of Google's AI services.
 
 ### Gemini keeps its own geo-check
 
@@ -397,21 +389,58 @@ Exit status 0 means served, 1 refused, 2 inconclusive. The watchdog asks every
 tells an address problem apart from your account: an account-level restriction follows
 you from exit to exit, while this one disappears the moment the exit changes.
 
+### AI Studio keeps a third one
+
+Google AI Studio can refuse an exit that Gemini serves: the page opens, and the model
+list fails with *"Failed to list models: User location is not supported for the API
+use."* The verdict belongs to the exit, so it comes and goes as exits rotate, and two
+servers can disagree at the same moment.
+
+It is not the Gemini API's check, although the wording is the API's. The message comes
+from the page's own model-list request, which only runs for a signed-in account —
+logged out, the page is nothing but a redirect to sign-in. The public API, called with
+a key through the very same exits, answered every one of them, including exits YouTube
+places in Russia. So there is no anonymous way to ask, and vps-psiphon does not ask. It
+does not need to: the exits AI Studio refuses are the ones the next section is about,
+and a manual `vps-psiphon rotate` covers the rest.
+
+### A mismatch, not a country
+
+Fifty-nine exits (55 distinct addresses) in one night, each checked four ways — Google's
+verdict, Gemini, AI Studio through a throwaway signed-in account, and the country
+Psiphon reports for the server it connected to:
+
+| Exit | Exits | Gemini or AI Studio broken |
+|---|---|---|
+| Google's verdict matches the server's country (FR, NL, DE) | 39 | 7 |
+| Genuine US — the server in the US, and Google says US | 8 | 0 |
+| Google's verdict differs from the server's — `US` or `RU` for a server in FR, NL or DE | 12 | **12** |
+
+The seven in the first row are refused by Gemini itself (error 1060), and the Gemini
+check rotates them away. The last row is what nothing else saw: an address Google has
+reclassified keeps working for YouTube and breaks the AI services. A `US` verdict on a
+European server looked like a harmless rewrite and was once accepted by default for
+that reason — but genuine US exits work; what breaks is the disagreement. So the
+watchdog compares Google's verdict with the country Psiphon reports and rotates on a
+mismatch, and there is no list of acceptable verdicts at all.
+
+By provider, DigitalOcean's servers in Germany fared worst that night — 9 of 11
+broken, mismatched or refused — and Akamai's best, 7 of 7 fine. Psiphon does not let
+you choose the provider, so that is information, not a setting.
+
 ### Optional settings
 
-Both live in `/etc/default/vps-psiphon`. That file is sourced by the shell, so **any
+These live in `/etc/default/vps-psiphon`. That file is sourced by the shell, so **any
 value containing spaces must be quoted** — unquoted, everything after the first space
 is run as a command.
 
 | Setting | Effect |
 |---|---|
-| `OK_REGIONS='DE NL JP'` | acceptable verdicts when no region is pinned; ignored while `EGRESS_REGION` is set |
 | `MIN_THROUGHPUT_KBPS=800` | throughput floor in KB/s, measured on the watchdog's own fetch. One value for every node; change it only for a node that genuinely cannot reach it. `0` disables the check |
 | `FAIL_WINDOW=5` | how many recent checks `FAIL_THRESHOLD` failures are counted over |
 | `THROUGHPUT_GRACE_SEC=900` | seconds after a container start during which the rate is logged but not judged, while the tunnel ramps. Keep it longer than the gap between checks, or the one reading it exists to excuse falls outside it |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
-| `ACCEPT_REGIONS='DE NL FR AT US'` | verdicts the country check tolerates. Empty = the computed default: everything requested, plus `US`. `any` accepts every country and leaves `DENY_REGIONS` as the only country check |
-| `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first and in every mode, unlike the allow-lists above; empty disables it |
+| `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first, in every mode; empty disables it |
 | `GEMINI_CHECK_SEC=7200` | seconds between asking Gemini whether it serves the exit; one refusal rotates at once. `0` disables it |
 
 ## Measurements
