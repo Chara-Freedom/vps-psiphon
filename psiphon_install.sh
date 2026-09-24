@@ -611,10 +611,11 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #      checked unconditionally.
 #   3. wrong country  — Google's verdict about this exit, published in YouTube's page
 #      source as "GL":"XX", is not one we accept. This is what makes Cloudflare WARP
-#      unusable for region-gated services: WARP reads back as the client's own
-#      country. Not every mismatch weighs the same — Psiphon is used mostly from
-#      America, so Google has reclassified many of its exits as US, which is harmless;
-#      a rewrite to a sanctioned region is trigger 2.
+#      unusable for Google's services: WARP defaults to the country of the server it
+#      runs on, but Google has marked WARP Russian wholesale, even where it does not
+#      consider the server itself Russian. Not every mismatch weighs the same —
+#      Psiphon is used mostly from America, so Google has reclassified many of its
+#      exits as US, which is harmless; a rewrite to a sanctioned region is trigger 2.
 #   4. stalled tunnel — SOCKS answers the liveness probe, yet no HTTP request through
 #      the tunnel completes. Judged by the ABSENCE of a response, never by its size,
 #      so a captcha page is not mistaken for a stall.
