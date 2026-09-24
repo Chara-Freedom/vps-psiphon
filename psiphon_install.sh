@@ -11,6 +11,7 @@
 #   /etc/default/vps-psiphon              parameters
 #   /usr/local/sbin/vps-psiphon-run       container launcher (systemd ExecStart)
 #   /usr/local/sbin/vps-psiphon-watchdog  liveness + burned-exit detector
+#   /usr/local/sbin/vps-psiphon-gemini-check  asks Gemini itself whether it serves the exit
 #   /usr/local/sbin/vps-psiphon-advance-region  walks REGION_POOL on each rotation
 #   /usr/local/sbin/vps-psiphon           management CLI
 #   /etc/systemd/system/vps-psiphon.service
@@ -335,7 +336,7 @@ chown -R 1000:1000 "$CONF_DIR"
 
 # Preserve operator-set values across a reinstall.
 OLD_OK_REGIONS=""; OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""
-OLD_FAIL_WINDOW=""; OLD_GRACE=""; OLD_ACCEPT_REGIONS=""
+OLD_FAIL_WINDOW=""; OLD_GRACE=""; OLD_ACCEPT_REGIONS=""; OLD_GEMINI_CHECK=""
 # Tracked as set-or-not, not by value: a deliberately emptied deny-list is a choice
 # the next reinstall must not undo.
 OLD_DENY_SET=0; OLD_DENY_REGIONS=""
@@ -352,6 +353,7 @@ if [ -r "$ENVF" ]; then
   OLD_MIN_THROUGHPUT="$(sed -n 's/^MIN_THROUGHPUT_KBPS=//p' "$ENVF")"
   OLD_FAIL_WINDOW="$(sed -n 's/^FAIL_WINDOW=//p' "$ENVF")"
   OLD_GRACE="$(sed -n 's/^THROUGHPUT_GRACE_SEC=//p' "$ENVF")"
+  OLD_GEMINI_CHECK="$(sed -n 's/^GEMINI_CHECK_SEC=//p' "$ENVF")"
   OLD_REGION_POOL="$(sed -n 's/^REGION_POOL=//p' "$ENVF" | tr -d "'")"
   # An explicit --region wins; otherwise an existing pool survives the reinstall.
   [ "$REGION_POOL_SET" = 1 ] || REGION_POOL="$OLD_REGION_POOL"
@@ -463,6 +465,18 @@ REGION_POOL='$REGION_POOL'
 # computed default — everything requested, plus US. The word any accepts every verdict.
 # Sanctioned regions are rejected either way: deny is checked first.
 ACCEPT_REGIONS='$ACCEPT_REGIONS'
+# Seconds between asking Gemini itself whether it serves this exit; 0 disables it.
+# Gemini runs a geo-check of its own, separate from the one behind YouTube's GL, and
+# the two disagree in both directions: an exit YouTube reads as NL was refused by
+# Gemini, while a host YouTube reads as RU was served by Gemini as Finland. So the
+# country checks above cannot see this failure — only Gemini can be asked. It is asked
+# anonymously (chatting without an account is part of the service, answered by a
+# lighter model), and a serving exit comes back with a reply and the country Gemini
+# places it in. A refusal is error 1060 and no reply at all. One refusal rotates at
+# once, with no second check and no cooldown: across ten addresses every refused one
+# returned 1060 and every serving one replied. Anything else — the page changed, the
+# network hiccuped — is logged and never rotates. About 1 MB per check.
+GEMINI_CHECK_SEC=${OLD_GEMINI_CHECK:-7200}
 EOF
 chmod 600 "$ENVF"
 
@@ -532,6 +546,58 @@ cfg="${CONF_DIR:-/opt/vps-psiphon/config}/psiphon.config"
 printf '%s -> %s\n' "${cur:-auto}" "$nxt"
 ADV
 chmod 0755 /usr/local/sbin/vps-psiphon-advance-region
+
+# ---- gemini check -----------------------------------------------------------
+cat > /usr/local/sbin/vps-psiphon-gemini-check <<'GEM'
+#!/usr/bin/env bash
+# Asks Gemini itself whether it serves this exit, and prints one line:
+#   exit 0  ok            Gemini replied; the line names the country it places us in
+#   exit 1  REFUSED       error 1060 and no reply: Gemini declines this address
+#   exit 2  inconclusive  anything else — never grounds for a rotation
+#
+# Gemini's geo-check is not the one behind YouTube's GL, and the two disagree in both
+# directions, so a green country check says nothing about Gemini. The page is fetched
+# first, for the session fields the chat endpoint wants and the cookies it sets; then
+# one message is sent, logged out. No account is involved.
+#
+#   --direct  probe from this host's own address instead of through the tunnel, to
+#             tell a burned exit apart from a refusal that follows the whole host.
+set -uo pipefail
+[ -r /etc/default/vps-psiphon ] && . /etc/default/vps-psiphon
+P=(--socks5-hostname "${BIND:-127.0.0.1}:${SOCKS_PORT:-1080}")
+[ "${1:-}" = --direct ] && P=(-4)
+UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+d="$(mktemp -d)" || { echo "inconclusive (no temp dir)"; exit 2; }
+trap 'rm -rf "$d"' EXIT
+C=(-s "${P[@]}" -A "$UA" -H 'Accept-Language: en-US,en;q=0.9' -b "$d/jar" -c "$d/jar")
+
+code="$(curl "${C[@]}" --max-time 30 -o "$d/app" -w '%{http_code}' https://gemini.google.com/app 2>/dev/null || true)"
+bl="$(grep -oE '"cfb2h":"[^"]+"' "$d/app" 2>/dev/null | head -1 | cut -d'"' -f4)"
+sid="$(grep -oE '"FdrFJe":"[^"]+"' "$d/app" 2>/dev/null | head -1 | cut -d'"' -f4)"
+if [ -z "$bl" ] || [ -z "$sid" ]; then
+  echo "inconclusive (page answered ${code:-nothing}, without the session fields)"; exit 2
+fi
+
+curl "${C[@]}" --max-time 60 -o "$d/out" \
+  -H 'Content-Type: application/x-www-form-urlencoded;charset=utf-8' \
+  -H 'Origin: https://gemini.google.com' -H 'Referer: https://gemini.google.com/' -H 'X-Same-Domain: 1' \
+  --data-urlencode 'f.req=[null,"[[\"hi\"],null,null]"]' \
+  "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=${bl}&f.sid=${sid}&hl=en&_reqid=$(( RANDOM * 10 + 100000 ))&rt=c" 2>/dev/null
+
+# A reply is a frame whose payload is not null. Error codes can trail a reply — 1096
+# follows every logged-out one — so they are only read when no reply came at all.
+if grep -q '"wrb.fr",null,"\[' "$d/out" 2>/dev/null; then
+  where="$(grep -oE '\\"[^"\\]+\\",\\"SWML_DESCRIPTION' "$d/out" | head -1 | cut -d'"' -f2 | tr -d '\\')"
+  echo "ok — Gemini replies, and places this exit in ${where:-an unnamed country}"; exit 0
+fi
+errs="$(grep -oE 'BardErrorInfo",\[[0-9]+\]' "$d/out" 2>/dev/null | grep -oE '[0-9]+' | sort -u | tr '\n' ' ')"
+case " $errs " in
+  *" 1060 "*) echo "REFUSED — Gemini declines this exit (error 1060, no reply)"; exit 1 ;;
+esac
+echo "inconclusive (no reply${errs:+, error ${errs% }})"; exit 2
+GEM
+chmod 755 /usr/local/sbin/vps-psiphon-gemini-check
+
 # ---- watchdog ---------------------------------------------------------------
 cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #!/usr/bin/env bash
@@ -558,6 +624,11 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #      without this gate a 30-90x collapse is invisible. Measured on the YouTube fetch
 #      below, and skipped for THROUGHPUT_GRACE_SEC after a start while the tunnel is
 #      still ramping.
+#   6. Gemini refuses — asked directly, every GEMINI_CHECK_SEC. Gemini keeps a geo-check
+#      of its own that GL does not track, so an exit can pass every check above and
+#      still be refused by Gemini. Unlike the others this one is decisive: error 1060
+#      with no reply rotates at once, bypassing the failure window and the cooldown,
+#      since a refused exit stays refused. An inconclusive answer never rotates.
 #
 # Google's /sorry captcha is recorded but never rotates on its own: a human solves one
 # in seconds, and churning the tunnel over it costs more than it saves.
@@ -569,8 +640,9 @@ S=(--socks5-hostname "${BIND:-127.0.0.1}:${SOCKS_PORT}")
 touch "$LOG" 2>/dev/null
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
-fails=0; last_rotate=0; captcha=0; window=""
+fails=0; last_rotate=0; captcha=0; window=""; last_gemini=0
 [ -r "$STATE" ] && . "$STATE"
+now=$(date +%s)
 
 alive=0
 # Retry once: a check that races tunnel establishment (boot, restart, rotate)
@@ -670,6 +742,22 @@ else
   captcha="$now_captcha"
 fi
 
+# Asked on its own clock, not on every run: the answer changes over days, and a chat
+# request every ten minutes would be noise to Gemini and to the log. An inconclusive
+# answer still counts as asked, so a changed page is retried on the same clock rather
+# than every run.
+decisive=0
+if [ "$alive" = 1 ] && [ "${GEMINI_CHECK_SEC:-7200}" -gt 0 ] \
+   && [ $((now - last_gemini)) -ge "${GEMINI_CHECK_SEC:-7200}" ]; then
+  gem="$(/usr/local/sbin/vps-psiphon-gemini-check)"; grc=$?
+  last_gemini=$now
+  log "gemini: $gem"
+  if [ "$grc" = 1 ]; then
+    decisive=1
+    [ -z "$reason" ] && reason="gemini-refused (error 1060 — one refusal is decisive)"
+  fi
+fi
+
 # Failures are counted over a window of recent checks. Consecutive ones are the wrong
 # unit: the tunnel that most needs rotating is degraded rather than dead, and it passes
 # every other check — which reset the counter and put rotation out of reach.
@@ -689,7 +777,8 @@ ones="${window//0/}"; fails="${#ones}"
 [ -n "$kbps" ] && log "throughput ${kbps} KB/s (country ${gl:-?})"
 
 now=$(date +%s)
-if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] && [ $((now - last_rotate)) -ge "${ROTATE_COOLDOWN:-1800}" ]; then
+if { [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] && [ $((now - last_rotate)) -ge "${ROTATE_COOLDOWN:-1800}" ]; } \
+   || [ "$decisive" = 1 ]; then
   old="$(curl -s --max-time 15 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
   log "rotating away from exit $old"
   moved="$(/usr/local/sbin/vps-psiphon-advance-region 2>/dev/null)"
@@ -701,7 +790,8 @@ if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] && [ $((now - last_rotate)) -ge "${RO
   fails=0; window=""; last_rotate=$now
 fi
 
-printf 'fails=%s\nlast_rotate=%s\ncaptcha=%s\nwindow=%s\n' "$fails" "$last_rotate" "$captcha" "$window" > "$STATE"
+printf 'fails=%s\nlast_rotate=%s\ncaptcha=%s\nwindow=%s\nlast_gemini=%s\n' \
+       "$fails" "$last_rotate" "$captcha" "$window" "$last_gemini" > "$STATE"
 WD
 chmod 755 /usr/local/sbin/vps-psiphon-watchdog
 touch /var/log/vps-psiphon-watchdog.log
@@ -771,6 +861,8 @@ status() {
   else
     echo "country   : ${gl:-?}   (Google's own verdict about this exit)"
   fi
+  # A separate question from the country line above: Gemini keeps its own geo-check.
+  echo -n "gemini    : "; /usr/local/sbin/vps-psiphon-gemini-check
   local rd; rd="$(curl -s -o /dev/null --max-time 25 "${S[@]}" -w '%{redirect_url}' 'https://www.google.com/search?q=status' 2>/dev/null)"
   case "$rd" in */sorry/*) echo "captcha   : yes (informational — no rotation, a human solves it)" ;;
                         *) echo "captcha   : no" ;; esac
@@ -852,7 +944,7 @@ case "${1:-status}" in
     # refuses while anything else references it, which is fine.
     docker image rm "$IMAGE" >/dev/null 2>&1
     rm -f /usr/local/sbin/vps-psiphon-run /usr/local/sbin/vps-psiphon-watchdog \
-          /usr/local/sbin/vps-psiphon-advance-region \
+          /usr/local/sbin/vps-psiphon-advance-region /usr/local/sbin/vps-psiphon-gemini-check \
           /etc/default/vps-psiphon /var/lib/vps-psiphon-watchdog.state \
           /var/log/vps-psiphon-watchdog.log /tmp/vpspsi.speed
     rm -rf /opt/vps-psiphon
@@ -862,7 +954,8 @@ case "${1:-status}" in
     # Claiming "removed" is worth nothing unmeasured — look at the disk and say so.
     left=""
     for p in /usr/local/sbin/vps-psiphon /usr/local/sbin/vps-psiphon-run \
-             /usr/local/sbin/vps-psiphon-watchdog /etc/default/vps-psiphon \
+             /usr/local/sbin/vps-psiphon-watchdog /usr/local/sbin/vps-psiphon-gemini-check \
+             /etc/default/vps-psiphon \
              /etc/systemd/system/vps-psiphon.service \
              /etc/systemd/system/vps-psiphon-watchdog.service \
              /etc/systemd/system/vps-psiphon-watchdog.timer \
