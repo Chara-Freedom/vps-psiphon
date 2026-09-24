@@ -195,7 +195,7 @@ measured.
 ## Managing it
 
 ```
-vps-psiphon                 state: region, exit IP, Google's country verdict, traffic
+vps-psiphon                 state: region, exit IP, Google's country verdict, Gemini's answer, traffic
 vps-psiphon rotate          fresh tunnel → different exit IP
 vps-psiphon region JP       change exit country
 vps-psiphon pool 'DE NL FR' countries to rotate through ('' clears it)
@@ -213,6 +213,7 @@ vps-psiphon uninstall       remove everything, including this CLI
 | `/etc/default/vps-psiphon` | parameters |
 | `/usr/local/sbin/vps-psiphon-run` | container launcher (`ExecStart`) |
 | `/usr/local/sbin/vps-psiphon-watchdog` | liveness + unusable-exit detector |
+| `/usr/local/sbin/vps-psiphon-gemini-check` | asks Gemini itself whether it serves the exit |
 | `/usr/local/sbin/vps-psiphon` | CLI |
 | `vps-psiphon.service` | container under systemd, `Restart=always` |
 | `vps-psiphon-watchdog.timer` | check every 10 minutes |
@@ -222,7 +223,7 @@ vps-psiphon uninstall       remove everything, including this CLI
 
 ## The watchdog
 
-Five rotation triggers, in order of how certain they are:
+Six rotation triggers, in order of how certain they are:
 
 1. **tunnel dead** — SOCKS does not answer.
 2. **denied country** — Google places the exit in a sanctioned or Google-blocked
@@ -261,6 +262,13 @@ Five rotation triggers, in order of how certain they are:
    `THROUGHPUT_GRACE_SEC` after a start: a freshly dialled tunnel is still ramping
    while every client the restart cut loose reconnects at once, and that first
    reading is far below where the tunnel settles minutes later.
+6. **Gemini refuses** — asked directly, every `GEMINI_CHECK_SEC` (two hours by
+   default). Gemini keeps a geo-check of its own that `GL` does not track, so an exit
+   can pass everything above and still be refused — see
+   [Gemini keeps its own geo-check](#gemini-keeps-its-own-geo-check). This trigger is
+   decisive: one refusal rotates at once, past the failure window and the cooldown,
+   because a refused exit stays refused. An answer that is neither a reply nor a
+   refusal is logged as inconclusive and never rotates.
 
 Google's captcha wall (`302 → /sorry/index`) is shown in `status` and logged when it
 changes, but never rotates on its own: a human solves a captcha in seconds, and
@@ -351,18 +359,43 @@ refuse a WARP exit, while services with honest IP geolocation are unaffected.**
 Psiphon is consistent across both — asking for JP, NL or DE yields exactly `JP`,
 `NL`, `DE` from Google and from the geolocation services alike.
 
-**A correct country is necessary, and it has never been caught being insufficient.**
-This section used to say that `GL` can disagree with the restrictions Google actually
-enforces on the same address — an exit reading as the right country being refused
-anyway. That is not what was observed. The one exit that looked like proof of it was
-refused on its **IPv4** address, and that address's `GL` had been saying `RU` the whole
-time: verdict and enforcement agreed exactly, on the same address. What disagreed was
-two addresses on one host, read by a probe that silently picked the one carrying no
-traffic. So force `-4` and take the answer at face value — if an exit in a supported
-country is refused, suspect the probe before inventing a second gate. What tells you it
-is the address and not your account: an account-level restriction follows you from
-exit to exit, while this one disappears the moment the exit changes. No unauthenticated
-probe sees it, so it is yours to notice and `vps-psiphon rotate` to fix.
+**`GL` is YouTube's verdict — and only YouTube's.** Force `-4` and take it at face
+value for YouTube. It says nothing reliable about Gemini, which runs a geo-check of its
+own; that is the next section.
+
+### Gemini keeps its own geo-check
+
+An exit can read as the right country to YouTube and still be refused by Gemini, and
+the reverse happens too. Measured on one day across ten addresses, all logged out:
+
+| Address | YouTube `GL` | Gemini |
+|---|---|---|
+| A Psiphon exit held for six days | `NL` | **refused, error 1060** |
+| Four other Psiphon exits | `NL`, `DE` | replies |
+| A Finnish VPS's own address, IPv4 | **`RU`** | replies, and places it in Finland |
+| Another Finnish VPS's own address | `FI` | replies, and places it in Finland |
+| A Dutch VPS's own address | `NL` | replies |
+| Two Russian VPSes | `RU`, one not read | **refused, error 1060** |
+
+The first row is the failure no country check can see: the tunnel fast, every check
+green, and Gemini refusing it for days until its users noticed. The third row is the
+mirror image.
+
+Chatting without an account is part of Gemini — logged-out messages are answered by a
+lighter model — so it can simply be asked: fetch the page for its session fields and
+cookies, send one message. A serving address replies and states the country Gemini
+places it in; a refused one returns error 1060 and nothing else. Every refused address
+above gave 1060 and every serving one replied, which is why one refusal is enough.
+
+```
+vps-psiphon-gemini-check            # through the tunnel
+vps-psiphon-gemini-check --direct   # from the host's own address
+```
+
+Exit status 0 means served, 1 refused, 2 inconclusive. The watchdog asks every
+`GEMINI_CHECK_SEC` and rotates on a refusal; `vps-psiphon status` asks as well. What
+tells an address problem apart from your account: an account-level restriction follows
+you from exit to exit, while this one disappears the moment the exit changes.
 
 ### Optional settings
 
@@ -379,6 +412,7 @@ is run as a command.
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
 | `ACCEPT_REGIONS='DE NL FR AT US'` | verdicts the country check tolerates. Empty = the computed default: everything requested, plus `US`. `any` accepts every country and leaves `DENY_REGIONS` as the only country check |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first and in every mode, unlike the allow-lists above; empty disables it |
+| `GEMINI_CHECK_SEC=7200` | seconds between asking Gemini whether it serves the exit; one refusal rotates at once. `0` disables it |
 
 ## Measurements
 
