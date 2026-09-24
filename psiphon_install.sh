@@ -956,7 +956,7 @@ case "${1:-status}" in
     left=""
     for p in /usr/local/sbin/vps-psiphon /usr/local/sbin/vps-psiphon-run \
              /usr/local/sbin/vps-psiphon-watchdog /usr/local/sbin/vps-psiphon-gemini-check \
-             /etc/default/vps-psiphon \
+             /usr/local/sbin/vps-psiphon-advance-region /etc/default/vps-psiphon \
              /etc/systemd/system/vps-psiphon.service \
              /etc/systemd/system/vps-psiphon-watchdog.service \
              /etc/systemd/system/vps-psiphon-watchdog.timer \
