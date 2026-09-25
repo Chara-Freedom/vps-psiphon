@@ -254,17 +254,20 @@ Six rotation triggers, in order of how certain they are:
    `THROUGHPUT_GRACE_SEC` after a start: a freshly dialled tunnel is still ramping
    while every client the restart cut loose reconnects at once, and that first
    reading is far below where the tunnel settles minutes later.
-6. **Gemini refuses** — asked directly, every `GEMINI_CHECK_SEC` (two hours by
-   default). Gemini keeps a geo-check of its own that `GL` does not track, so an exit
+6. **Gemini refuses** — asked directly: once for every new tunnel, at its first check
+   — a rotation, `rotate`, `region` and a reinstall all start one — and then every
+   `GEMINI_CHECK_SEC` (two hours by default), so a refused exit does not stand until
+   the old clock runs out. Gemini keeps a geo-check of its own that `GL` does not track, so an exit
    can pass everything above and still be refused — see
    [Gemini keeps its own geo-check](#gemini-keeps-its-own-geo-check). This trigger is
    decisive: one refusal rotates at once, past the failure window and the cooldown,
    because a refused exit stays refused. An answer that is neither a reply nor a
    refusal is logged as inconclusive and never rotates.
 
-Google's captcha wall (`302 → /sorry/index`) is shown in `status` and logged when it
-changes, but never rotates on its own: a human solves a captcha in seconds, and
-churning the tunnel over one costs more than it saves.
+Google's captcha wall (`302 → /sorry/index`) is not probed at all. It never justified
+a rotation — a human solves a captcha in seconds — and the probe that watched for it,
+the same search every ten minutes from the same address, was the most bot-like thing
+the watchdog did.
 
 Threshold is 2 failures within the last 5 checks, cooldown between rotations 30
 minutes (`FAIL_THRESHOLD`, `FAIL_WINDOW`, `ROTATE_COOLDOWN`). A window rather than a
@@ -384,8 +387,9 @@ vps-psiphon-gemini-check            # through the tunnel
 vps-psiphon-gemini-check --direct   # from the host's own address
 ```
 
-Exit status 0 means served, 1 refused, 2 inconclusive. The watchdog asks every
-`GEMINI_CHECK_SEC` and rotates on a refusal; `vps-psiphon status` asks as well. What
+Exit status 0 means served, 1 refused, 2 inconclusive. The watchdog asks once per new
+tunnel and then every `GEMINI_CHECK_SEC`, and rotates on a refusal; `vps-psiphon
+status` asks as well. What
 tells an address problem apart from your account: an account-level restriction follows
 you from exit to exit, while this one disappears the moment the exit changes.
 
@@ -441,7 +445,7 @@ is run as a command.
 | `THROUGHPUT_GRACE_SEC=900` | seconds after a container start during which the rate is logged but not judged, while the tunnel ramps. Keep it longer than the gap between checks, or the one reading it exists to excuse falls outside it |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first, in every mode; empty disables it |
-| `GEMINI_CHECK_SEC=7200` | seconds between asking Gemini whether it serves the exit; one refusal rotates at once. `0` disables it |
+| `GEMINI_CHECK_SEC=7200` | seconds between asking Gemini whether it serves the exit; every new tunnel is also asked at its first check. One refusal rotates at once. `0` disables it |
 
 ## Measurements
 

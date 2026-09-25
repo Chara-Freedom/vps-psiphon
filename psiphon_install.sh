@@ -358,8 +358,9 @@ MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-800}
 # or it never applies.
 THROUGHPUT_GRACE_SEC=${OLD_GRACE:-900}
 # Seconds between asking Gemini itself whether it serves the exit — one anonymous
-# message, about 1 MB. Gemini keeps a geo-check of its own that no country check sees.
-# A refusal rotates at once; an inconclusive answer never does. 0 disables it.
+# message, about 1 MB; every new tunnel is also asked at its first check. Gemini keeps
+# a geo-check of its own that no country check sees. A refusal rotates at once; an
+# inconclusive answer never does. 0 disables it.
 GEMINI_CHECK_SEC=${OLD_GEMINI_CHECK:-7200}
 EOF
 chmod 600 "$ENVF"
@@ -485,9 +486,9 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #   5. slow tunnel       — the exit carries almost nothing. Psiphon picks its server
 #      per tunnel, so a bad pick stays until something forces a reconnect. Not judged
 #      for THROUGHPUT_GRACE_SEC after a start.
-#   6. Gemini refuses    — asked every GEMINI_CHECK_SEC; Gemini keeps a geo-check of its
-#      own. Error 1060 rotates at once, past the failure window and the cooldown.
-# Google's /sorry captcha is logged but never rotates: a human solves it in seconds.
+#   6. Gemini refuses    — asked at the first check of every new tunnel, then every
+#      GEMINI_CHECK_SEC; Gemini keeps a geo-check of its own. Error 1060 rotates at
+#      once, past the failure window and the cooldown.
 set -uo pipefail
 . /etc/default/vps-psiphon
 LOG=/var/log/vps-psiphon-watchdog.log
@@ -496,7 +497,7 @@ S=(--socks5-hostname "${BIND:-127.0.0.1}:${SOCKS_PORT}")
 touch "$LOG" 2>/dev/null
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
-fails=0; last_rotate=0; captcha=0; window=""; last_gemini=0
+fails=0; last_rotate=0; window=""; last_gemini=0; gemini_tunnel=""
 [ -r "$STATE" ] && . "$STATE"
 now=$(date +%s)
 
@@ -509,7 +510,7 @@ for attempt in 1 2; do
   [ "$attempt" = 1 ] && sleep 15
 done
 
-reason=""; gl=""; sr=""; kbps=""
+reason=""; gl=""; sr=""; kbps=""; started=""
 if [ "$alive" = 0 ]; then
   reason="socks-dead"
 else
@@ -552,24 +553,18 @@ else
       fi
     fi
   fi
-  # Informational only, logged on change.
-  rd="$(curl -s -o /dev/null --max-time 25 "${S[@]}" -w '%{redirect_url}' \
-        'https://www.google.com/search?q=status' 2>/dev/null || true)"
-  now_captcha=0; case "$rd" in */sorry/*) now_captcha=1 ;; esac
-  if [ "$now_captcha" != "$captcha" ]; then
-    [ "$now_captcha" = 1 ] && log "note: Google now serves a captcha to this exit (informational, no action)" \
-                           || log "note: Google no longer serves a captcha to this exit"
-  fi
-  captcha="$now_captcha"
 fi
 
-# Gemini is asked on its own clock — its answer changes over days. An inconclusive
-# answer still counts as asked, so a changed page is not retried every run.
+# Gemini is asked once per tunnel as soon as it is up — a rotation, `rotate`, `region`
+# or a reinstall all start a new container, and an exit Gemini refuses should not
+# stand until the old clock runs out — and then on its own clock, since the answer
+# changes over days. An inconclusive answer still counts as asked.
 decisive=0
 if [ "$alive" = 1 ] && [ "${GEMINI_CHECK_SEC:-7200}" -gt 0 ] \
-   && [ $((now - last_gemini)) -ge "${GEMINI_CHECK_SEC:-7200}" ]; then
+   && { { [ -n "$started" ] && [ "$started" != "$gemini_tunnel" ]; } \
+        || [ $((now - last_gemini)) -ge "${GEMINI_CHECK_SEC:-7200}" ]; }; then
   gem="$(/usr/local/sbin/vps-psiphon-gemini-check)"; grc=$?
-  last_gemini=$now
+  last_gemini=$now; gemini_tunnel="$started"
   log "gemini: $gem"
   if [ "$grc" = 1 ]; then
     decisive=1
@@ -604,8 +599,8 @@ if { [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] && [ $((now - last_rotate)) -ge "${
   fails=0; window=""; last_rotate=$now
 fi
 
-printf 'fails=%s\nlast_rotate=%s\ncaptcha=%s\nwindow=%s\nlast_gemini=%s\n' \
-       "$fails" "$last_rotate" "$captcha" "$window" "$last_gemini" > "$STATE"
+printf "fails=%s\nlast_rotate=%s\nwindow=%s\nlast_gemini=%s\ngemini_tunnel='%s'\n" \
+       "$fails" "$last_rotate" "$window" "$last_gemini" "$gemini_tunnel" > "$STATE"
 WD
 chmod 755 /usr/local/sbin/vps-psiphon-watchdog
 touch /var/log/vps-psiphon-watchdog.log
@@ -654,9 +649,6 @@ status() {
   [ -n "$gl_verdict" ] || gl_verdict="Google's own verdict about this exit"
   echo "country   : ${gl:-?}   ($gl_verdict)"
   echo -n "gemini    : "; /usr/local/sbin/vps-psiphon-gemini-check
-  local rd; rd="$(curl -s -o /dev/null --max-time 25 "${S[@]}" -w '%{redirect_url}' 'https://www.google.com/search?q=status' 2>/dev/null)"
-  case "$rd" in */sorry/*) echo "captcha   : yes (informational — no rotation, a human solves it)" ;;
-                        *) echo "captcha   : no" ;; esac
   echo -n "traffic   : "; docker exec "$NAME" cat /proc/net/dev 2>/dev/null | awk '/eth0/{printf "rx %.2f GB / tx %.2f GB\n", $2/1e9, $10/1e9}' || echo 'n/a'
 }
 
