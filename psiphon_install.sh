@@ -337,10 +337,12 @@ DEVICE_REGION=$DEVICE_REGION
 CONF_DIR=$CONF_DIR
 # FAIL_THRESHOLD failures within the last FAIL_WINDOW checks rotate the tunnel. A
 # window, not a run: a degraded tunnel flaps around the floor, and a counter reset by
-# every passing check never reaches the threshold.
+# every passing check never reaches the threshold. There is no cooldown: the window
+# starts empty after a rotation, so two checks always separate one from the next. A
+# cooldown could only delay a rotation, never prevent one — the failures that asked for
+# it were still in the window when it expired — and the exit it held was a known-bad one.
 FAIL_THRESHOLD=2
 FAIL_WINDOW=${OLD_FAIL_WINDOW:-5}
-ROTATE_COOLDOWN=1800
 # Countries to rotate through, space separated; empty keeps rotations inside
 # EGRESS_REGION. A retry then draws on another country's servers.
 REGION_POOL='$REGION_POOL'
@@ -488,7 +490,7 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #      for THROUGHPUT_GRACE_SEC after a start.
 #   6. Gemini refuses    — asked at the first check of every new tunnel, then every
 #      GEMINI_CHECK_SEC; Gemini keeps a geo-check of its own. Error 1060 rotates at
-#      once, past the failure window and the cooldown.
+#      once, past the failure window.
 set -uo pipefail
 . /etc/default/vps-psiphon
 LOG=/var/log/vps-psiphon-watchdog.log
@@ -497,7 +499,7 @@ S=(--socks5-hostname "${BIND:-127.0.0.1}:${SOCKS_PORT}")
 touch "$LOG" 2>/dev/null
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
-fails=0; last_rotate=0; window=""; last_gemini=0; gemini_tunnel=""
+fails=0; window=""; last_gemini=0; gemini_tunnel=""
 [ -r "$STATE" ] && . "$STATE"
 now=$(date +%s)
 
@@ -585,9 +587,7 @@ ones="${window//0/}"; fails="${#ones}"
 [ -n "$reason" ] && log "check failed ($reason), $fails of the last ${#window} checks"
 [ -n "$kbps" ] && log "throughput ${kbps} KB/s (country ${gl:-?}, server ${sr:-?})"
 
-now=$(date +%s)
-if { [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] && [ $((now - last_rotate)) -ge "${ROTATE_COOLDOWN:-1800}" ]; } \
-   || [ "$decisive" = 1 ]; then
+if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] || [ "$decisive" = 1 ]; then
   old="$(curl -s --max-time 15 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
   log "rotating away from exit $old"
   moved="$(/usr/local/sbin/vps-psiphon-advance-region 2>/dev/null)"
@@ -596,11 +596,11 @@ if { [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] && [ $((now - last_rotate)) -ge "${
   sleep 45
   new="$(curl -s --max-time 20 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
   log "rotated: $old -> $new"
-  fails=0; window=""; last_rotate=$now
+  fails=0; window=""
 fi
 
-printf "fails=%s\nlast_rotate=%s\nwindow=%s\nlast_gemini=%s\ngemini_tunnel='%s'\n" \
-       "$fails" "$last_rotate" "$window" "$last_gemini" "$gemini_tunnel" > "$STATE"
+printf "fails=%s\nwindow=%s\nlast_gemini=%s\ngemini_tunnel='%s'\n" \
+       "$fails" "$window" "$last_gemini" "$gemini_tunnel" > "$STATE"
 WD
 chmod 755 /usr/local/sbin/vps-psiphon-watchdog
 touch /var/log/vps-psiphon-watchdog.log

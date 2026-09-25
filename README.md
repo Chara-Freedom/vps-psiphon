@@ -260,8 +260,8 @@ Six rotation triggers, in order of how certain they are:
    the old clock runs out. Gemini keeps a geo-check of its own that `GL` does not track, so an exit
    can pass everything above and still be refused — see
    [Gemini keeps its own geo-check](#gemini-keeps-its-own-geo-check). This trigger is
-   decisive: one refusal rotates at once, past the failure window and the cooldown,
-   because a refused exit stays refused. An answer that is neither a reply nor a
+   decisive: one refusal rotates at once, past the failure window, because a refused
+   exit stays refused. An answer that is neither a reply nor a
    refusal is logged as inconclusive and never rotates.
 
 Google's captcha wall (`302 → /sorry/index`) is not probed at all. It never justified
@@ -269,12 +269,19 @@ a rotation — a human solves a captcha in seconds — and the probe that watche
 the same search every ten minutes from the same address, was the most bot-like thing
 the watchdog did.
 
-Threshold is 2 failures within the last 5 checks, cooldown between rotations 30
-minutes (`FAIL_THRESHOLD`, `FAIL_WINDOW`, `ROTATE_COOLDOWN`). A window rather than a
-run of consecutive failures, because the tunnel that most needs rotating is the one
-that is degraded rather than dead — and that one passes every other check, which
-resets a consecutive counter and keeps the rotation permanently out of reach.
-Journal: `/var/log/vps-psiphon-watchdog.log`.
+Threshold is 2 failures within the last 5 checks (`FAIL_THRESHOLD`, `FAIL_WINDOW`).
+A window rather than a run of consecutive failures, because the tunnel that most needs
+rotating is the one that is degraded rather than dead — and that one passes every
+other check, which resets a consecutive counter and keeps the rotation permanently out
+of reach. Journal: `/var/log/vps-psiphon-watchdog.log`.
+
+There is no cooldown between rotations. The window starts empty after each rotation,
+so two checks — about twenty minutes — always separate one from the next. An earlier
+version held rotations 30 minutes apart; across five deployments over three weeks that
+cooldown held a rotation back 113 times and prevented none, because the failures that
+asked for it were still in the window when it expired. All it did was keep a known-bad
+exit — dead, stalled, or one Google places in a denied country — for a median of ten
+more minutes.
 
 Rotation is meaningful here because Psiphon exits live on heterogeneous third-party
 infrastructure — reconnecting changes both the address and the ASN.
