@@ -279,7 +279,7 @@ chown -R 1000:1000 "$CONF_DIR"
 
 # Preserve operator-set values across a reinstall. The deny-list is tracked as
 # set-or-not, not by value: a deliberately emptied one must stay empty.
-OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""; OLD_FAIL_WINDOW=""; OLD_GRACE=""; OLD_GEMINI_CHECK=""
+OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""; OLD_FAIL_WINDOW=""; OLD_GEMINI_CHECK=""
 OLD_DENY_SET=0; OLD_DENY_REGIONS=""
 if [ -r "$ENVF" ] && grep -q '^DENY_REGIONS=' "$ENVF"; then
   OLD_DENY_SET=1
@@ -292,7 +292,6 @@ fi
 if [ -r "$ENVF" ]; then
   OLD_MIN_THROUGHPUT="$(sed -n 's/^MIN_THROUGHPUT_KBPS=//p' "$ENVF")"
   OLD_FAIL_WINDOW="$(sed -n 's/^FAIL_WINDOW=//p' "$ENVF")"
-  OLD_GRACE="$(sed -n 's/^THROUGHPUT_GRACE_SEC=//p' "$ENVF")"
   OLD_GEMINI_CHECK="$(sed -n 's/^GEMINI_CHECK_SEC=//p' "$ENVF")"
   OLD_REGION_POOL="$(sed -n 's/^REGION_POOL=//p' "$ENVF" | tr -d "'")"
   [ "$REGION_POOL_SET" = 1 ] || REGION_POOL="$OLD_REGION_POOL"
@@ -356,10 +355,6 @@ DENY_REGIONS='$DENY_REGIONS'
 # real collapse trips it on the second check at 600 and at 1000 alike. Lower it only
 # for a node whose own history shows it cannot reach it.
 MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-800}
-# Seconds after a container start during which throughput is logged but not judged,
-# while the fresh tunnel ramps. Keep it longer than the 10-minute gap between checks,
-# or it never applies.
-THROUGHPUT_GRACE_SEC=${OLD_GRACE:-900}
 # Seconds between asking Gemini itself whether it serves the exit — one anonymous
 # message, about 1 MB; every new tunnel is also asked at its first check. Gemini keeps
 # a geo-check of its own that no country check sees. A refusal rotates at once; an
@@ -591,8 +586,8 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #   4. stalled tunnel    — SOCKS answers, yet no HTTP request through the tunnel
 #      completes. Judged by the absence of a response, so a captcha is not a stall.
 #   5. slow tunnel       — the exit carries almost nothing. Psiphon picks its server
-#      per tunnel, so a bad pick stays until something forces a reconnect. Not judged
-#      for THROUGHPUT_GRACE_SEC after a start.
+#      per tunnel, so a bad pick stays until something forces a reconnect. Judged
+#      from the first check, which comes ~10 minutes into a tunnel, well past its ramp.
 #   6. Gemini refuses    — asked at the first check of every new tunnel, then every
 #      GEMINI_CHECK_SEC; Gemini keeps a geo-check of its own. Error 1060 rotates at
 #      once, past the failure window.
@@ -641,11 +636,7 @@ else
       reason="country-mismatch (Google sees $gl, the server is in $sr)"
     fi
   fi
-  # An unknown tunnel age reads as old: disabling the gate on a failed lookup is the
-  # worse mistake.
-  up_for=999999
   started="$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-vps-psiphon}" 2>/dev/null)"
-  [ -n "$started" ] && up_for=$(( $(date +%s) - $(date -d "$started" +%s 2>/dev/null || echo 0) ))
   if [ -z "$reason" ] && [ "$ytcode" = "000" ]; then
     reason="stalled-tunnel (no HTTP response in 25s while SOCKS answered)"
   fi
@@ -653,11 +644,7 @@ else
   # anything — a truncated fetch is itself a symptom.
   if [ -z "$reason" ] && [ "${MIN_THROUGHPUT_KBPS:-0}" -gt 0 ] && [ "$got" -ge 50000 ]; then
     if [ "$kbps" -lt "${MIN_THROUGHPUT_KBPS}" ]; then
-      if [ "$up_for" -lt "${THROUGHPUT_GRACE_SEC:-900}" ]; then
-        log "slow (${kbps} KB/s) but the tunnel is ${up_for}s old — still ramping, not judged"
-      else
-        reason="slow-tunnel (${kbps} KB/s < ${MIN_THROUGHPUT_KBPS} KB/s floor)"
-      fi
+      reason="slow-tunnel (${kbps} KB/s < ${MIN_THROUGHPUT_KBPS} KB/s floor)"
     fi
   fi
 fi

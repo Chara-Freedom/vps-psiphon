@@ -250,10 +250,11 @@ Six rotation triggers, in order of how certain they are:
    1000 costs the slowest two and 1200 five — and a real collapse is caught on the
    second check either way. What made the old default of 100 useless was its distance
    from reality: a working tunnel reads in the thousands, so a fifteen-fold collapse
-   passed for health. The gate is skipped for
-   `THROUGHPUT_GRACE_SEC` after a start: a freshly dialled tunnel is still ramping
-   while every client the restart cut loose reconnects at once, and that first
-   reading is far below where the tunnel settles minutes later.
+   passed for health. A new tunnel is judged from its first check, which comes about
+   ten minutes in, well past its ramp. An earlier version excused that reading all the
+   same; across four nodes over five weeks, of 276 tunnels with a slow first reading,
+   the excuse changed nothing for 28, spared 22 that went on to serve, and kept 226
+   that were rotated anyway one check longer — ten minutes each, 45 hours in all.
 6. **Gemini refuses** — asked directly: once for every new tunnel, at its first check
    — a rotation, `rotate`, `region` and a reinstall all start one — and then every
    `GEMINI_CHECK_SEC` (two hours by default), so a refused exit does not stand until
@@ -449,7 +450,6 @@ is run as a command.
 |---|---|
 | `MIN_THROUGHPUT_KBPS=800` | throughput floor in KB/s, measured on the watchdog's own fetch. One value for every node; change it only for a node that genuinely cannot reach it. `0` disables the check |
 | `FAIL_WINDOW=5` | how many recent checks `FAIL_THRESHOLD` failures are counted over |
-| `THROUGHPUT_GRACE_SEC=900` | seconds after a container start during which the rate is logged but not judged, while the tunnel ramps. Keep it longer than the gap between checks, or the one reading it exists to excuse falls outside it |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first, in every mode; empty disables it |
 | `GEMINI_CHECK_SEC=7200` | seconds between asking Gemini whether it serves the exit; every new tunnel is also asked at its first check. One refusal rotates at once. `0` disables it |
