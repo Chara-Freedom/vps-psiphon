@@ -466,7 +466,7 @@ subscription is not needed to lift a limit that is not applied.
 
 | What | Value |
 |---|---|
-| Single stream | ~23 Mbit/s, steady across 1 GB |
+| Single stream | ~23 Mbit/s, steady across 1 GB — at Psiphon's default window, see below |
 | 8 streams aggregate | 196 Mbit/s on one German exit, 53 on another |
 | Upload, 4 streams | 62 Mbit/s |
 | TTFB to DE/NL | 0.12 s |
@@ -477,6 +477,34 @@ subscription is not needed to lift a limit that is not applied.
 Exit region affects throughput more than anything else: from Europe, DE versus SG
 differs by more than tenfold. The individual server within a region matters too —
 aggregate differed fourfold between two German exits.
+
+### The window per connection
+
+Every connection through the tunnel is one SSH channel, and Psiphon gives each channel
+a window of 4 × 32 KB = 128 KB by default. A connection moves at most about a window
+per round trip — ~20 Mbit/s over a 30 ms tunnel, however idle the tunnel is. That is
+the single-stream figure above; on two nodes with different round trips a connection
+held the same ~75 KB in flight, the signature of a fixed window. Psiphon keeps it small
+on purpose: its client serves one person, and a large window lets one bulk download
+queue ahead of everything else on the shared SSH connection.
+
+The launcher sets `SSHChannelWindowSize` to 32 (1 MB). Measured on a test box, exits in
+DE, round trip held at ~30 ms, two runs per value on a different server each time (one
+broken server each at 128 KB and 2 MB left out):
+
+| Window | One connection | Small request, idle → behind 8 downloads |
+|---|---|---|
+| 128 KB (Psiphon's default) | 21 Mbit/s | 100 → 101 ms |
+| 512 KB | 35–45 Mbit/s | 210 → 260, 260 → 265 ms |
+| 1 MB | 110–300 Mbit/s | 99 → 102, 92 → 95 ms |
+| 2 MB | 260–290 Mbit/s | 109 → 160 ms |
+| 4 MB | 65–550 Mbit/s | 95 → 106, 108 → 250 ms |
+
+At 1 MB one connection got several times faster and nothing else waited longer; from
+2 MB a small request behind the downloads began to wait. It matters for whatever moves
+a lot through one connection — YouTube above 1080p is the usual case — and changes
+nothing for Gemini, whose answers are small. The watchdog's own fetch rose only
+1.3–1.7x, so its throughput floor keeps its meaning.
 
 ## Pitfalls
 

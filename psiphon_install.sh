@@ -379,6 +379,41 @@ cat > /usr/local/sbin/vps-psiphon-run <<'RUN'
 set -euo pipefail
 . /etc/default/vps-psiphon
 docker rm -f "$NAME" >/dev/null 2>&1 || true
+
+# Psiphon's window per connection, in 32 KB blocks. Its default, 4 (128 KB), caps one
+# connection at about a window per round trip — ~20 Mbit/s over a 30 ms tunnel, however
+# idle the tunnel is. 32 (1 MB) measured 5-14x faster per connection with no added wait
+# for a small request behind eight downloads; 64 and 128 began to delay it.
+WINDOW=32
+cfg="${CONF_DIR}/psiphon.config"
+# The image writes psiphon.config only when it is absent, from its template plus the
+# ports and regions. Seeded here the same way, so the first tunnel after an install or
+# `region` carries the window too. If the template cannot be read, the image seeds the
+# file as before and the window applies from the next start.
+if [ ! -f "$cfg" ] &&
+   docker run --rm --entrypoint cat "$IMAGE" /etc/psiphon/psiphon.config > "$cfg.new" 2>/dev/null &&
+   [ -s "$cfg.new" ]; then
+  sed -i -E \
+    -e "s/\"LocalHttpProxyPort\"[[:space:]]*:[[:space:]]*[0-9]+/\"LocalHttpProxyPort\": ${HTTP_PORT}/" \
+    -e "s/\"LocalSocksProxyPort\"[[:space:]]*:[[:space:]]*[0-9]+/\"LocalSocksProxyPort\": ${SOCKS_PORT}/" \
+    "$cfg.new"
+  if [ -n "${DEVICE_REGION:-}" ]; then
+    sed -i -E "s/\"DeviceRegion\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"DeviceRegion\": \"${DEVICE_REGION}\"/" "$cfg.new"
+  fi
+  if [ -n "${EGRESS_REGION:-}" ]; then
+    sed -i -E "s/\"EgressRegion\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"EgressRegion\": \"${EGRESS_REGION}\"/" "$cfg.new"
+  fi
+  mv "$cfg.new" "$cfg"
+fi
+rm -f "$cfg.new"
+if [ -f "$cfg" ]; then
+  if grep -q '"SSHChannelWindowSize"' "$cfg"; then
+    sed -i -E "s/\"SSHChannelWindowSize\"[[:space:]]*:[[:space:]]*[0-9]+/\"SSHChannelWindowSize\": ${WINDOW}/" "$cfg"
+  else
+    sed -i "0,/{/s/{/{\n \"SSHChannelWindowSize\": ${WINDOW},/" "$cfg"
+  fi
+fi
+
 # The BIND prefix is load-bearing: psiphon listens on 0.0.0.0 inside the container,
 # so publishing without it exposes an OPEN SOCKS5 PROXY to the internet.
 PUB=( -p "${BIND}:${SOCKS_PORT}:${SOCKS_PORT}" )
