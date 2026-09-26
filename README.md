@@ -269,31 +269,41 @@ Only a slow tunnel is judged over a window of checks. Every other trigger is dec
 one failure rotates at once, because those do not pass by themselves. Across four
 nodes' logs — two since mid-August, two since early September — the check after a
 failure that did not rotate — ten minutes later, the interval then — found Google's
-verdict about the exit
-unchanged 173 times out of 173, and a dead or stalled tunnel still failing 98 times out
-of 113, carrying nothing in the meantime. A slow tunnel had recovered by then about
-half the time, 387 times out of 755, and that is what the window is for.
+verdict about the exit unchanged 173 times out of 173, and a dead or stalled tunnel
+still failing 98 times out of 113, carrying nothing in the meantime. A slow tunnel had
+recovered by then about half the time, 387 times out of 755, and that is what the
+window is for.
+
+A check during which the tunnel restarted — the installer, `rotate` or `region` — is
+not judged: its readings belong to neither tunnel, and a decisive failure among them
+would rotate the fresh one for nothing. The journal says so and the counters stay as
+they were.
 
 Google's captcha wall (`302 → /sorry/index`) is not probed at all. It never justified
 a rotation — a human solves a captcha in seconds — and the probe that watched for it,
 the same search every ten minutes from the same address, was the most bot-like thing
 the watchdog did.
 
-For a slow tunnel the threshold is 2 failures within the last 5 checks
+For a slow tunnel the threshold is 2 failures within the last 3 checks
 (`FAIL_THRESHOLD`, `FAIL_WINDOW`). A window rather than a run of consecutive failures,
 because the tunnel that most needs rotating is the one that is degraded rather than
 dead — and that one passes every other check, which resets a consecutive counter and
-keeps the rotation permanently out of reach. Journal: `/var/log/vps-psiphon-watchdog.log`.
+keeps the rotation permanently out of reach. Three checks still catch it, and a tunnel
+that fails every check, while two isolated dips further apart no longer rotate. Of 542
+slow-tunnel rotations on four nodes, 87 came from two failures with two or more passing
+checks between them, and those passing checks read a median of about 1400 KB/s — the
+tunnel was serving. The window used to be five checks; a reinstall moves the old
+default to the new one and keeps a value set by hand. Journal:
+`/var/log/vps-psiphon-watchdog.log`.
 
 Checks run every five minutes, down from ten: a dead tunnel is now seen about two and
 a half minutes after it dies on average, and a slow one is rotated five minutes after
 its first failure instead of ten. Each run fetches YouTube's front page through the
 tunnel, about 800 KB — some 7 GB a month — which is noise next to the users' own
 YouTube traffic leaving through the same exit; the captcha probe was a different matter,
-an identical search query every time. The cost is in the window: five checks now span
-25 minutes rather than 50, so a dip that lasts five to ten minutes can rotate a tunnel
-that would have recovered by the next check at the old interval. Ten-minute logs cannot
-say how often that happens; `FAIL_WINDOW` is the knob if it does.
+an identical search query every time. Closer checks also make a short dip more likely
+to show up twice, which is part of why the window is three checks — ten minutes from
+first failure to last — rather than five.
 
 There is no cooldown between rotations. The window starts empty after each rotation,
 so a slow tunnel always gets two checks — about ten minutes — while a decisive
@@ -469,7 +479,7 @@ is run as a command.
 | Setting | Effect |
 |---|---|
 | `MIN_THROUGHPUT_KBPS=800` | throughput floor in KB/s, measured on the watchdog's own fetch. One value for every node; change it only for a node that genuinely cannot reach it. `0` disables the check |
-| `FAIL_WINDOW=5` | how many recent checks `FAIL_THRESHOLD` failures are counted over |
+| `FAIL_WINDOW=3` | how many recent checks `FAIL_THRESHOLD` failures are counted over |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first, in every mode; empty disables it |
 | `GEMINI_CHECK_SEC=7200` | seconds between asking Gemini whether it serves the exit; every new tunnel is also asked at its first check. One refusal rotates at once. `0` disables it |

@@ -292,6 +292,8 @@ fi
 if [ -r "$ENVF" ]; then
   OLD_MIN_THROUGHPUT="$(sed -n 's/^MIN_THROUGHPUT_KBPS=//p' "$ENVF")"
   OLD_FAIL_WINDOW="$(sed -n 's/^FAIL_WINDOW=//p' "$ENVF")"
+  # 5 was the default until the window shrank to 3; only a value set by hand is kept.
+  [ "$OLD_FAIL_WINDOW" = 5 ] && OLD_FAIL_WINDOW=""
   OLD_GEMINI_CHECK="$(sed -n 's/^GEMINI_CHECK_SEC=//p' "$ENVF")"
   OLD_REGION_POOL="$(sed -n 's/^REGION_POOL=//p' "$ENVF" | tr -d "'")"
   [ "$REGION_POOL_SET" = 1 ] || REGION_POOL="$OLD_REGION_POOL"
@@ -343,7 +345,7 @@ CONF_DIR=$CONF_DIR
 # could only delay a rotation, never prevent one — the failures that asked for it were
 # still in the window when it expired — and the exit it held was a known-bad one.
 FAIL_THRESHOLD=2
-FAIL_WINDOW=${OLD_FAIL_WINDOW:-5}
+FAIL_WINDOW=${OLD_FAIL_WINDOW:-3}
 # Countries to rotate through, space separated; empty keeps rotations inside
 # EGRESS_REGION. A retry then draws on another country's servers.
 REGION_POOL='$REGION_POOL'
@@ -604,6 +606,11 @@ fails=0; window=""; last_gemini=0; gemini_tunnel=""
 [ -r "$STATE" ] && . "$STATE"
 now=$(date +%s)
 
+# The tunnel this check is about. A restart during the check — the installer, `rotate`,
+# `region` — leaves readings that belong to neither tunnel, and a decisive failure among
+# them would rotate the fresh one for nothing, so such a check is not judged.
+started="$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-vps-psiphon}" 2>/dev/null)"
+
 alive=0
 # Retry once, so a check racing a (re)start does not log a failure that never was.
 for attempt in 1 2; do
@@ -613,7 +620,7 @@ for attempt in 1 2; do
   [ "$attempt" = 1 ] && sleep 15
 done
 
-reason=""; gl=""; sr=""; kbps=""; started=""
+reason=""; gl=""; sr=""; kbps=""
 if [ "$alive" = 0 ]; then
   reason="socks-dead"
 else
@@ -637,7 +644,6 @@ else
       reason="country-mismatch (Google sees $gl, the server is in $sr)"
     fi
   fi
-  started="$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-vps-psiphon}" 2>/dev/null)"
   if [ -z "$reason" ] && [ "$ytcode" = "000" ]; then
     reason="stalled-tunnel (no HTTP response in 25s while SOCKS answered)"
   fi
@@ -648,6 +654,11 @@ else
       reason="slow-tunnel (${kbps} KB/s < ${MIN_THROUGHPUT_KBPS} KB/s floor)"
     fi
   fi
+fi
+
+if [ "$started" != "$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-vps-psiphon}" 2>/dev/null)" ]; then
+  log "check not judged: the tunnel restarted during it${reason:+ (it read: $reason)}"
+  exit 0
 fi
 
 # Only a slow reading can be a passing dip, so only it waits for the window. A dead or
@@ -684,7 +695,7 @@ else
 fi
 # Trimmed only when longer than the window: in bash an offset larger than the string
 # yields the EMPTY string, which would silently forget every failure.
-[ "${#window}" -gt "${FAIL_WINDOW:-5}" ] && window="${window: -${FAIL_WINDOW:-5}}"
+[ "${#window}" -gt "${FAIL_WINDOW:-3}" ] && window="${window: -${FAIL_WINDOW:-3}}"
 ones="${window//0/}"; fails="${#ones}"
 [ -n "$reason" ] && log "check failed ($reason), $fails of the last ${#window} checks"
 [ -n "$kbps" ] && log "throughput ${kbps} KB/s (country ${gl:-?}, server ${sr:-?})"
