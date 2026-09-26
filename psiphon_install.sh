@@ -335,12 +335,13 @@ PUBLISH_HTTP=$PUBLISH_HTTP
 EGRESS_REGION=$EGRESS_REGION
 DEVICE_REGION=$DEVICE_REGION
 CONF_DIR=$CONF_DIR
-# FAIL_THRESHOLD failures within the last FAIL_WINDOW checks rotate the tunnel. A
+# FAIL_THRESHOLD failures within the last FAIL_WINDOW checks rotate a slow tunnel; a
+# dead or stalled tunnel, a country failure and a Gemini refusal rotate at once. A
 # window, not a run: a degraded tunnel flaps around the floor, and a counter reset by
 # every passing check never reaches the threshold. There is no cooldown: the window
-# starts empty after a rotation, so two checks always separate one from the next. A
-# cooldown could only delay a rotation, never prevent one — the failures that asked for
-# it were still in the window when it expired — and the exit it held was a known-bad one.
+# starts empty after a rotation, so a slow tunnel always gets two checks. A cooldown
+# could only delay a rotation, never prevent one — the failures that asked for it were
+# still in the window when it expired — and the exit it held was a known-bad one.
 FAIL_THRESHOLD=2
 FAIL_WINDOW=${OLD_FAIL_WINDOW:-5}
 # Countries to rotate through, space separated; empty keeps rotations inside
@@ -649,11 +650,20 @@ else
   fi
 fi
 
+# Only a slow reading can be a passing dip, so only it waits for the window. A dead or
+# stalled tunnel and a country failure rotate at once: in four nodes' logs the next
+# check found Google's verdict unchanged 173 times out of 173 and a dead or stalled
+# tunnel still failing 98 times out of 113 — carrying nothing meanwhile — while a slow
+# one had recovered 387 times out of 755.
+decisive=0
+case "$reason" in
+  socks-dead*|stalled-tunnel*|denied-country*|country-mismatch*) decisive=1 ;;
+esac
+
 # Gemini is asked once per tunnel as soon as it is up — a rotation, `rotate`, `region`
 # or a reinstall all start a new container, and an exit Gemini refuses should not
 # stand until the old clock runs out — and then on its own clock, since the answer
 # changes over days. An inconclusive answer still counts as asked.
-decisive=0
 if [ "$alive" = 1 ] && [ "${GEMINI_CHECK_SEC:-7200}" -gt 0 ] \
    && { { [ -n "$started" ] && [ "$started" != "$gemini_tunnel" ]; } \
         || [ $((now - last_gemini)) -ge "${GEMINI_CHECK_SEC:-7200}" ]; }; then

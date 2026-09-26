@@ -260,24 +260,37 @@ Six rotation triggers, in order of how certain they are:
    `GEMINI_CHECK_SEC` (two hours by default), so a refused exit does not stand until
    the old clock runs out. Gemini keeps a geo-check of its own that `GL` does not track, so an exit
    can pass everything above and still be refused — see
-   [Gemini keeps its own geo-check](#gemini-keeps-its-own-geo-check). This trigger is
-   decisive: one refusal rotates at once, past the failure window, because a refused
+   [Gemini keeps its own geo-check](#gemini-keeps-its-own-geo-check). A refused
    exit stays refused. An answer that is neither a reply nor a
    refusal is logged as inconclusive and never rotates.
+
+Only a slow tunnel is judged over a window of checks. Every other trigger is decisive:
+one failure rotates at once, because those do not pass by themselves. Across four
+nodes' logs — two since mid-August, two since early September — the check after a
+failure that did not rotate, ten minutes later, found Google's verdict about the exit
+unchanged 173 times out of 173, and a dead or stalled tunnel still failing 98 times out
+of 113, carrying nothing in the meantime. A slow tunnel had recovered by then about
+half the time, 387 times out of 755, and that is what the window is for.
 
 Google's captcha wall (`302 → /sorry/index`) is not probed at all. It never justified
 a rotation — a human solves a captcha in seconds — and the probe that watched for it,
 the same search every ten minutes from the same address, was the most bot-like thing
 the watchdog did.
 
-Threshold is 2 failures within the last 5 checks (`FAIL_THRESHOLD`, `FAIL_WINDOW`).
-A window rather than a run of consecutive failures, because the tunnel that most needs
-rotating is the one that is degraded rather than dead — and that one passes every
-other check, which resets a consecutive counter and keeps the rotation permanently out
-of reach. Journal: `/var/log/vps-psiphon-watchdog.log`.
+For a slow tunnel the threshold is 2 failures within the last 5 checks
+(`FAIL_THRESHOLD`, `FAIL_WINDOW`). A window rather than a run of consecutive failures,
+because the tunnel that most needs rotating is the one that is degraded rather than
+dead — and that one passes every other check, which resets a consecutive counter and
+keeps the rotation permanently out of reach. Journal: `/var/log/vps-psiphon-watchdog.log`.
+
+Checks run every ten minutes, and a shorter interval is not the way to react faster.
+Each run fetches YouTube's front page through the tunnel, so halving the interval
+doubles the same request from one address — the pattern the captcha probe was dropped
+for — and the floor and the window were fitted to this cadence.
 
 There is no cooldown between rotations. The window starts empty after each rotation,
-so two checks — about twenty minutes — always separate one from the next. An earlier
+so a slow tunnel always gets two checks — about twenty minutes — while a decisive
+failure rotates at the first, about ten minutes in. An earlier
 version held rotations 30 minutes apart; across five deployments over three weeks that
 cooldown held a rotation back 113 times and prevented none, because the failures that
 asked for it were still in the window when it expired. All it did was keep a known-bad
