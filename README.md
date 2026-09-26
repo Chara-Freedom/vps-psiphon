@@ -214,7 +214,7 @@ vps-psiphon uninstall       remove everything, including this CLI
 | `/usr/local/sbin/vps-psiphon-gemini-check` | asks Gemini itself whether it serves the exit |
 | `/usr/local/sbin/vps-psiphon` | CLI |
 | `vps-psiphon.service` | container under systemd, `Restart=always` |
-| `vps-psiphon-watchdog.timer` | check every 10 minutes |
+| `vps-psiphon-watchdog.timer` | check every 5 minutes |
 | `/opt/vps-psiphon/config` | Psiphon config (container volume) |
 | `/var/log/vps-psiphon-watchdog.log` | watchdog journal |
 | `/var/lib/vps-psiphon-watchdog.state` | watchdog counters |
@@ -250,11 +250,12 @@ Six rotation triggers, in order of how certain they are:
    1000 costs the slowest two and 1200 five — and a real collapse is caught on the
    second check either way. What made the old default of 100 useless was its distance
    from reality: a working tunnel reads in the thousands, so a fifteen-fold collapse
-   passed for health. A new tunnel is judged from its first check, which comes about
-   ten minutes in, well past its ramp. An earlier version excused that reading all the
-   same; across four nodes over five weeks, of 276 tunnels with a slow first reading,
-   the excuse changed nothing for 28, spared 22 that went on to serve, and kept 226
-   that were rotated anyway one check longer — ten minutes each, 45 hours in all.
+   passed for health. A new tunnel is judged from its first check, about five minutes
+   in; its ramp takes a minute or two. An earlier version excused that reading; across
+   four nodes over five weeks, with checks then ten minutes apart, of 276 tunnels with
+   a slow first reading the excuse changed nothing for 28, spared 22 that went on to
+   serve, and kept 226 that were rotated anyway one check longer — ten minutes each,
+   45 hours in all.
 6. **Gemini refuses** — asked directly: once for every new tunnel, at its first check
    — a rotation, `rotate`, `region` and a reinstall all start one — and then every
    `GEMINI_CHECK_SEC` (two hours by default), so a refused exit does not stand until
@@ -267,7 +268,8 @@ Six rotation triggers, in order of how certain they are:
 Only a slow tunnel is judged over a window of checks. Every other trigger is decisive:
 one failure rotates at once, because those do not pass by themselves. Across four
 nodes' logs — two since mid-August, two since early September — the check after a
-failure that did not rotate, ten minutes later, found Google's verdict about the exit
+failure that did not rotate — ten minutes later, the interval then — found Google's
+verdict about the exit
 unchanged 173 times out of 173, and a dead or stalled tunnel still failing 98 times out
 of 113, carrying nothing in the meantime. A slow tunnel had recovered by then about
 half the time, 387 times out of 755, and that is what the window is for.
@@ -283,14 +285,19 @@ because the tunnel that most needs rotating is the one that is degraded rather t
 dead — and that one passes every other check, which resets a consecutive counter and
 keeps the rotation permanently out of reach. Journal: `/var/log/vps-psiphon-watchdog.log`.
 
-Checks run every ten minutes, and a shorter interval is not the way to react faster.
-Each run fetches YouTube's front page through the tunnel, so halving the interval
-doubles the same request from one address — the pattern the captcha probe was dropped
-for — and the floor and the window were fitted to this cadence.
+Checks run every five minutes, down from ten: a dead tunnel is now seen about two and
+a half minutes after it dies on average, and a slow one is rotated five minutes after
+its first failure instead of ten. Each run fetches YouTube's front page through the
+tunnel, about 800 KB — some 7 GB a month — which is noise next to the users' own
+YouTube traffic leaving through the same exit; the captcha probe was a different matter,
+an identical search query every time. The cost is in the window: five checks now span
+25 minutes rather than 50, so a dip that lasts five to ten minutes can rotate a tunnel
+that would have recovered by the next check at the old interval. Ten-minute logs cannot
+say how often that happens; `FAIL_WINDOW` is the knob if it does.
 
 There is no cooldown between rotations. The window starts empty after each rotation,
-so a slow tunnel always gets two checks — about twenty minutes — while a decisive
-failure rotates at the first, about ten minutes in. An earlier
+so a slow tunnel always gets two checks — about ten minutes — while a decisive
+failure rotates at the first, about five minutes in. An earlier
 version held rotations 30 minutes apart; across five deployments over three weeks that
 cooldown held a rotation back 113 times and prevented none, because the failures that
 asked for it were still in the window when it expired. All it did was keep a known-bad

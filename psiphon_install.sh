@@ -588,7 +588,7 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #      completes. Judged by the absence of a response, so a captcha is not a stall.
 #   5. slow tunnel       — the exit carries almost nothing. Psiphon picks its server
 #      per tunnel, so a bad pick stays until something forces a reconnect. Judged
-#      from the first check, which comes ~10 minutes into a tunnel, well past its ramp.
+#      from the first check, ~5 minutes into a tunnel; the ramp takes a minute or two.
 #   6. Gemini refuses    — asked at the first check of every new tunnel, then every
 #      GEMINI_CHECK_SEC; Gemini keeps a geo-check of its own. Error 1060 rotates at
 #      once, past the failure window.
@@ -871,11 +871,11 @@ U2
 
 cat > /etc/systemd/system/vps-psiphon-watchdog.timer <<'U3'
 [Unit]
-Description=Run the vps-psiphon watchdog every 10 minutes
+Description=Run the vps-psiphon watchdog every 5 minutes
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=10min
+OnUnitActiveSec=5min
 AccuracySec=30s
 
 [Install]
