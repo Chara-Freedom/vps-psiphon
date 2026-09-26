@@ -502,8 +502,12 @@ broken server each at 128 KB and 2 MB left out):
 
 At 1 MB one connection got several times faster and nothing else waited longer; from
 2 MB a small request behind the downloads began to wait. It matters for whatever moves
-a lot through one connection — YouTube above 1080p is the usual case — and changes
-nothing for Gemini, whose answers are small. The watchdog's own fetch rose only
+a lot through one connection, and YouTube is the usual case: with QUIC unavailable a
+player typically takes video and audio from one host over one connection. 1080p at 60
+frames runs at roughly 5–9 Mbit/s, and the player keeps a margin above the bitrate it
+picks, so it lands right at the default window's ceiling — ~20 Mbit/s at 30 ms, ~10 at
+60 ms — and drops quality on any slower server. 1440p and 4K sit above that ceiling
+outright. It changes nothing for Gemini, whose answers are small. The watchdog's own fetch rose only
 1.3–1.7x, so its throughput floor keeps its meaning.
 
 ## Pitfalls
