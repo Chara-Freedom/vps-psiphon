@@ -482,16 +482,23 @@ aggregate differed fourfold between two German exits.
 
 Every connection through the tunnel is one SSH channel, and Psiphon gives each channel
 a window of 4 × 32 KB = 128 KB by default. The window is how much the Psiphon server may
-send down the channel before the client on the VPS allows it to send more. The client
-grants that on receiving the data, so once the server has sent a full window it waits:
-the data has to reach the VPS and the grant has to come back. That wait is the round
-trip (RTT), meaning the one between the VPS and the Psiphon server, not the one to the
-site. Hence the ceiling: a connection moves at most about a window per round trip —
-~20 Mbit/s over a 30 ms tunnel, however idle the tunnel is. That is
-the single-stream figure above; on two nodes with different round trips a connection
-held the same ~75 KB in flight, the signature of a fixed window. Psiphon keeps it small
-on purpose: its client serves one person, and a large window lets one bulk download
-queue ahead of everything else on the shared SSH connection.
+send down the channel before the client on the VPS allows it to send more. Once the
+server has sent a full window it waits: the data has to reach the VPS and the grant has
+to come back. That wait is the round trip (RTT), meaning the one between the VPS and the
+Psiphon server, not the one to the site. Hence the ceiling: a connection moves at most
+a window per round trip, however idle the tunnel is.
+
+In practice less than a window is in flight. The client returns the window in batches
+rather than after every piece, a rule Psiphon takes from OpenSSH: a grant goes out once
+more than three 32 KB packets or more than half the window are unreturned. Against
+OpenSSH's 2 MB window that is nothing, but at 128 KB the window comes back every
+64–96 KB, so on average 32–48 KB has reached the VPS without being returned yet and
+~80–96 KB is left in flight. On two nodes with different round trips a connection held
+the same ~75 KB in flight, the signature of a fixed window — ~20 Mbit/s over a 30 ms
+tunnel; the batches account for most of the gap to 128 KB. That is the single-stream
+figure above. Psiphon keeps the window small on purpose: its client serves one person,
+and a large window lets one bulk download queue ahead of everything else on the shared
+SSH connection.
 
 The launcher sets `SSHChannelWindowSize` to 32 (1 MB). Measured on a test box, exits in
 DE, round trip held at ~30 ms, two runs per value on a different server each time (one
