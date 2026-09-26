@@ -470,7 +470,7 @@ subscription is not needed to lift a limit that is not applied.
 | 8 streams aggregate | 196 Mbit/s on one German exit, 53 on another |
 | Upload, 4 streams | 62 Mbit/s |
 | TTFB to DE/NL | 0.12 s |
-| TTFB to SG | 1.11 s — a single stream fell to 1.6 Mbit/s purely from RTT |
+| TTFB to SG | 1.11 s — a single stream fell to 1.6 Mbit/s purely from RTT, see [The window per connection](#the-window-per-connection) |
 | Reconnects | none across the whole run, exit IP never changed |
 | UDP | `UDP ASSOCIATE` → `REP=7 COMMAND NOT SUPPORTED`; `CONNECT` → `REP=0` |
 
@@ -481,8 +481,13 @@ aggregate differed fourfold between two German exits.
 ### The window per connection
 
 Every connection through the tunnel is one SSH channel, and Psiphon gives each channel
-a window of 4 × 32 KB = 128 KB by default. A connection moves at most about a window
-per round trip — ~20 Mbit/s over a 30 ms tunnel, however idle the tunnel is. That is
+a window of 4 × 32 KB = 128 KB by default. The window is how much the Psiphon server may
+send down the channel before the client on the VPS allows it to send more. The client
+grants that on receiving the data, so once the server has sent a full window it waits:
+the data has to reach the VPS and the grant has to come back. That wait is the round
+trip (RTT), meaning the one between the VPS and the Psiphon server, not the one to the
+site. Hence the ceiling: a connection moves at most about a window per round trip —
+~20 Mbit/s over a 30 ms tunnel, however idle the tunnel is. That is
 the single-stream figure above; on two nodes with different round trips a connection
 held the same ~75 KB in flight, the signature of a fixed window. Psiphon keeps it small
 on purpose: its client serves one person, and a large window lets one bulk download
