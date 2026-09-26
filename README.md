@@ -85,8 +85,7 @@ Requires root, docker and curl.
 | `--http-port N` | 8080 | HTTP proxy port |
 | `--no-http` | — | do not publish the HTTP proxy at all; remembered across reinstalls |
 | `--http` | — | publish it after all — undoes a stored `--no-http` |
-| `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked in every mode. Empty disables it |
-| `--accept 'CC…'` | everything requested, plus `US` | countries Google's verdict may report — *not* the same question as which countries to ask for. `any` accepts every verdict and leaves the deny-list as the only country check |
+| `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked first, in every mode. Empty disables it |
 | `--bind ADDR` | docker0 gateway | host address the ports are published on |
 | `--bind-loopback` | — | publish on `127.0.0.1` instead of the gateway |
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
@@ -195,11 +194,10 @@ measured.
 ## Managing it
 
 ```
-vps-psiphon                 state: region, exit IP, Google's country verdict, traffic
+vps-psiphon                 state: region, server's country, exit IP, Google's verdict, Gemini's answer, traffic
 vps-psiphon rotate          fresh tunnel → different exit IP
 vps-psiphon region JP       change exit country
 vps-psiphon pool 'DE NL FR' countries to rotate through ('' clears it)
-vps-psiphon accept 'DE US'  verdicts to tolerate ('' restores the default)
 vps-psiphon speed           50 MB single stream + 4 streams aggregate
 vps-psiphon logs [n]        Psiphon client log
 vps-psiphon watchdog [n]    watchdog journal
@@ -213,6 +211,7 @@ vps-psiphon uninstall       remove everything, including this CLI
 | `/etc/default/vps-psiphon` | parameters |
 | `/usr/local/sbin/vps-psiphon-run` | container launcher (`ExecStart`) |
 | `/usr/local/sbin/vps-psiphon-watchdog` | liveness + unusable-exit detector |
+| `/usr/local/sbin/vps-psiphon-gemini-check` | asks Gemini itself whether it serves the exit |
 | `/usr/local/sbin/vps-psiphon` | CLI |
 | `vps-psiphon.service` | container under systemd, `Restart=always` |
 | `vps-psiphon-watchdog.timer` | check every 10 minutes |
@@ -222,25 +221,19 @@ vps-psiphon uninstall       remove everything, including this CLI
 
 ## The watchdog
 
-Five rotation triggers, in order of how certain they are:
+Six rotation triggers, in order of how certain they are:
 
 1. **tunnel dead** — SOCKS does not answer.
 2. **denied country** — Google places the exit in a sanctioned or Google-blocked
-   region (`DENY_REGIONS`, default `RU BY IR SY CU KP CN VE`). This is the only
-   country check that runs in *every* mode: with no pinned region and no
-   `OK_REGIONS`, the allow-list below is empty by definition and judges nothing —
-   which is exactly when an exit in a sanctioned region would sit there unnoticed.
-   The two lists are not alternatives. The set of acceptable countries is closed and
-   short, so an allow-list handles a pinned region well; the set of dangerous ones is
-   open, which is why it is worth naming them separately and checking them always.
-3. **wrong country** — Google's verdict about the exit is not one of the countries
-   you accept (`ACCEPT_REGIONS`, default: everything requested plus `US`). This is
-   deliberately a different list from the one you ask for. `GL` is Google's opinion
-   about an *address*, not the server's location, and it rewrites many Psiphon exits
-   to `US` whatever country they report — so judging the verdict against the request
-   rotated exits that were fast and healthy. `US` is in the default because Google
-   gates none of the services this tool exists to reach behind it; a verdict of, say,
-   `SG` still rotates, because that one costs latency.
+   region (`DENY_REGIONS`, default `RU BY IR SY CU KP CN VE`). Checked first, in
+   every mode.
+3. **country mismatch** — Google's verdict about the exit (`GL`) is not the country
+   Psiphon reports for the server it connected to. Google has reclassified that
+   address, and such exits break Google's AI services — see
+   [A mismatch, not a country](#a-mismatch-not-a-country). There is no list of
+   acceptable verdicts: the fault is the disagreement itself, and an exit where both
+   sides say the same country works, whichever country it is. If either side cannot
+   be read, nothing is judged.
 4. **stalled tunnel** — SOCKS answers the liveness probe, but no HTTP request through
    the tunnel completes at all. Judged by the absence of a response rather than its
    size, so Google's captcha — small, but a response — is never read as a stall.
@@ -261,17 +254,34 @@ Five rotation triggers, in order of how certain they are:
    `THROUGHPUT_GRACE_SEC` after a start: a freshly dialled tunnel is still ramping
    while every client the restart cut loose reconnects at once, and that first
    reading is far below where the tunnel settles minutes later.
+6. **Gemini refuses** — asked directly: once for every new tunnel, at its first check
+   — a rotation, `rotate`, `region` and a reinstall all start one — and then every
+   `GEMINI_CHECK_SEC` (two hours by default), so a refused exit does not stand until
+   the old clock runs out. Gemini keeps a geo-check of its own that `GL` does not track, so an exit
+   can pass everything above and still be refused — see
+   [Gemini keeps its own geo-check](#gemini-keeps-its-own-geo-check). This trigger is
+   decisive: one refusal rotates at once, past the failure window, because a refused
+   exit stays refused. An answer that is neither a reply nor a
+   refusal is logged as inconclusive and never rotates.
 
-Google's captcha wall (`302 → /sorry/index`) is shown in `status` and logged when it
-changes, but never rotates on its own: a human solves a captcha in seconds, and
-churning the tunnel over one costs more than it saves.
+Google's captcha wall (`302 → /sorry/index`) is not probed at all. It never justified
+a rotation — a human solves a captcha in seconds — and the probe that watched for it,
+the same search every ten minutes from the same address, was the most bot-like thing
+the watchdog did.
 
-Threshold is 2 failures within the last 5 checks, cooldown between rotations 30
-minutes (`FAIL_THRESHOLD`, `FAIL_WINDOW`, `ROTATE_COOLDOWN`). A window rather than a
-run of consecutive failures, because the tunnel that most needs rotating is the one
-that is degraded rather than dead — and that one passes every other check, which
-resets a consecutive counter and keeps the rotation permanently out of reach.
-Journal: `/var/log/vps-psiphon-watchdog.log`.
+Threshold is 2 failures within the last 5 checks (`FAIL_THRESHOLD`, `FAIL_WINDOW`).
+A window rather than a run of consecutive failures, because the tunnel that most needs
+rotating is the one that is degraded rather than dead — and that one passes every
+other check, which resets a consecutive counter and keeps the rotation permanently out
+of reach. Journal: `/var/log/vps-psiphon-watchdog.log`.
+
+There is no cooldown between rotations. The window starts empty after each rotation,
+so two checks — about twenty minutes — always separate one from the next. An earlier
+version held rotations 30 minutes apart; across five deployments over three weeks that
+cooldown held a rotation back 113 times and prevented none, because the failures that
+asked for it were still in the window when it expired. All it did was keep a known-bad
+exit — dead, stalled, or one Google places in a denied country — for a median of ten
+more minutes.
 
 Rotation is meaningful here because Psiphon exits live on heterogeneous third-party
 infrastructure — reconnecting changes both the address and the ASN.
@@ -293,10 +303,8 @@ vps-psiphon pool 'DE NL FR AT'                 # or set it later
 vps-psiphon pool ''                            # back to a single fixed country
 ```
 
-The pool doubles as the country check's allow-list — anything you list is accepted
-as a destination, so keep it to countries you actually want to be seen from and
-that are near enough not to cost you the latency. Empty (the default) leaves
-behaviour exactly as it was: rotations stay in `EGRESS_REGION`.
+Keep the pool to countries near enough not to cost you the latency. Empty (the
+default) keeps rotations in `EGRESS_REGION`.
 
 The region is applied by rewriting `psiphon.config` in place. The image seeds that
 file only when it is absent, so the edit sticks — and the client keeps its cached
@@ -348,37 +356,103 @@ SOCKS tunnel, so they see the exit's own address and nothing else.
 
 The consequence is therefore narrow and specific: **services gated on Google's view
 refuse a WARP exit, while services with honest IP geolocation are unaffected.**
-Psiphon is consistent across both — asking for JP, NL or DE yields exactly `JP`,
-`NL`, `DE` from Google and from the geolocation services alike.
+Psiphon is mostly consistent across both — most exits come back as the country asked
+for, from Google and from the geolocation services alike. The ones that do not are
+the subject of [A mismatch, not a country](#a-mismatch-not-a-country).
 
-**A correct country is necessary, and it has never been caught being insufficient.**
-This section used to say that `GL` can disagree with the restrictions Google actually
-enforces on the same address — an exit reading as the right country being refused
-anyway. That is not what was observed. The one exit that looked like proof of it was
-refused on its **IPv4** address, and that address's `GL` had been saying `RU` the whole
-time: verdict and enforcement agreed exactly, on the same address. What disagreed was
-two addresses on one host, read by a probe that silently picked the one carrying no
-traffic. So force `-4` and take the answer at face value — if an exit in a supported
-country is refused, suspect the probe before inventing a second gate. What tells you it
-is the address and not your account: an account-level restriction follows you from
-exit to exit, while this one disappears the moment the exit changes. No unauthenticated
-probe sees it, so it is yours to notice and `vps-psiphon rotate` to fix.
+**`GL` is YouTube's verdict.** Force `-4` and take it at face value for YouTube. A `GL`
+that agrees with the server's country says nothing reliable about Gemini, which runs a
+geo-check of its own — that is the next section; a `GL` that disagrees is a sign of
+trouble for all of Google's AI services.
+
+### Gemini keeps its own geo-check
+
+An exit can read as the right country to YouTube and still be refused by Gemini, and
+the reverse happens too. Measured on one day across ten addresses, all logged out:
+
+| Address | YouTube `GL` | Gemini |
+|---|---|---|
+| A Psiphon exit held for six days | `NL` | **refused, error 1060** |
+| Four other Psiphon exits | `NL`, `DE` | replies |
+| A Finnish VPS's own address, IPv4 | **`RU`** | replies, and places it in Finland |
+| Another Finnish VPS's own address | `FI` | replies, and places it in Finland |
+| A Dutch VPS's own address | `NL` | replies |
+| Two Russian VPSes | `RU`, one not read | **refused, error 1060** |
+
+The first row is the failure no country check can see: the tunnel fast, every check
+green, and Gemini refusing it for days until its users noticed. The third row is the
+mirror image.
+
+Chatting without an account is part of Gemini — logged-out messages are answered by a
+lighter model — so it can simply be asked: fetch the page for its session fields and
+cookies, send one message. A serving address replies and states the country Gemini
+places it in; a refused one returns error 1060 and nothing else. Every refused address
+above gave 1060 and every serving one replied, which is why one refusal is enough.
+
+```
+vps-psiphon-gemini-check            # through the tunnel
+vps-psiphon-gemini-check --direct   # from the host's own address
+```
+
+Exit status 0 means served, 1 refused, 2 inconclusive. The watchdog asks once per new
+tunnel and then every `GEMINI_CHECK_SEC`, and rotates on a refusal; `vps-psiphon
+status` asks as well. What
+tells an address problem apart from your account: an account-level restriction follows
+you from exit to exit, while this one disappears the moment the exit changes.
+
+### AI Studio keeps a third one
+
+Google AI Studio can refuse an exit that Gemini serves: the page opens, and the model
+list fails with *"Failed to list models: User location is not supported for the API
+use."* The verdict belongs to the exit, so it comes and goes as exits rotate, and two
+servers can disagree at the same moment.
+
+It is not the Gemini API's check, although the wording is the API's. The message comes
+from the page's own model-list request, which only runs for a signed-in account —
+logged out, the page is nothing but a redirect to sign-in. The public API, called with
+a key through the very same exits, answered every one of them, including exits YouTube
+places in Russia. So there is no anonymous way to ask, and vps-psiphon does not ask. It
+does not need to: the exits AI Studio refuses are the ones the next section is about,
+and a manual `vps-psiphon rotate` covers the rest.
+
+### A mismatch, not a country
+
+Fifty-nine exits (55 distinct addresses) in one night, each checked four ways — Google's
+verdict, Gemini, AI Studio through a throwaway signed-in account, and the country
+Psiphon reports for the server it connected to:
+
+| Exit | Exits | Gemini or AI Studio broken |
+|---|---|---|
+| Google's verdict matches the server's country (FR, NL, DE) | 39 | 7 |
+| Genuine US — the server in the US, and Google says US | 8 | 0 |
+| Google's verdict differs from the server's — `US` or `RU` for a server in FR, NL or DE | 12 | **12** |
+
+The seven in the first row are refused by Gemini itself (error 1060), and the Gemini
+check rotates them away. The last row is what nothing else saw: an address Google has
+reclassified keeps working for YouTube and breaks the AI services. A `US` verdict on a
+European server looked like a harmless rewrite and was once accepted by default for
+that reason — but genuine US exits work; what breaks is the disagreement. So the
+watchdog compares Google's verdict with the country Psiphon reports and rotates on a
+mismatch, and there is no list of acceptable verdicts at all.
+
+By provider, DigitalOcean's servers in Germany fared worst that night — 9 of 11
+broken, mismatched or refused — and Akamai's best, 7 of 7 fine. Psiphon does not let
+you choose the provider, so that is information, not a setting.
 
 ### Optional settings
 
-Both live in `/etc/default/vps-psiphon`. That file is sourced by the shell, so **any
+These live in `/etc/default/vps-psiphon`. That file is sourced by the shell, so **any
 value containing spaces must be quoted** — unquoted, everything after the first space
 is run as a command.
 
 | Setting | Effect |
 |---|---|
-| `OK_REGIONS='DE NL JP'` | acceptable verdicts when no region is pinned; ignored while `EGRESS_REGION` is set |
 | `MIN_THROUGHPUT_KBPS=800` | throughput floor in KB/s, measured on the watchdog's own fetch. One value for every node; change it only for a node that genuinely cannot reach it. `0` disables the check |
 | `FAIL_WINDOW=5` | how many recent checks `FAIL_THRESHOLD` failures are counted over |
 | `THROUGHPUT_GRACE_SEC=900` | seconds after a container start during which the rate is logged but not judged, while the tunnel ramps. Keep it longer than the gap between checks, or the one reading it exists to excuse falls outside it |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
-| `ACCEPT_REGIONS='DE NL FR AT US'` | verdicts the country check tolerates. Empty = the computed default: everything requested, plus `US`. `any` accepts every country and leaves `DENY_REGIONS` as the only country check |
-| `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first and in every mode, unlike the allow-lists above; empty disables it |
+| `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first, in every mode; empty disables it |
+| `GEMINI_CHECK_SEC=7200` | seconds between asking Gemini whether it serves the exit; every new tunnel is also asked at its first check. One refusal rotates at once. `0` disables it |
 
 ## Measurements
 
@@ -392,17 +466,61 @@ subscription is not needed to lift a limit that is not applied.
 
 | What | Value |
 |---|---|
-| Single stream | ~23 Mbit/s, steady across 1 GB |
+| Single stream | ~23 Mbit/s, steady across 1 GB — at Psiphon's default window, see below |
 | 8 streams aggregate | 196 Mbit/s on one German exit, 53 on another |
 | Upload, 4 streams | 62 Mbit/s |
 | TTFB to DE/NL | 0.12 s |
-| TTFB to SG | 1.11 s — a single stream fell to 1.6 Mbit/s purely from RTT |
+| TTFB to SG | 1.11 s — a single stream fell to 1.6 Mbit/s purely from RTT, see [The window per connection](#the-window-per-connection) |
 | Reconnects | none across the whole run, exit IP never changed |
 | UDP | `UDP ASSOCIATE` → `REP=7 COMMAND NOT SUPPORTED`; `CONNECT` → `REP=0` |
 
 Exit region affects throughput more than anything else: from Europe, DE versus SG
 differs by more than tenfold. The individual server within a region matters too —
 aggregate differed fourfold between two German exits.
+
+### The window per connection
+
+Every connection through the tunnel is one SSH channel, and Psiphon gives each channel
+a window of 4 × 32 KB = 128 KB by default. The window is how much the Psiphon server may
+send down the channel before the client on the VPS allows it to send more. Once the
+server has sent a full window it waits: the data has to reach the VPS and the grant has
+to come back. That wait is the round trip (RTT), meaning the one between the VPS and the
+Psiphon server, not the one to the site. Hence the ceiling: a connection moves at most
+a window per round trip, however idle the tunnel is.
+
+In practice less than a window is in flight. The client returns the window in batches
+rather than after every piece, a rule Psiphon takes from OpenSSH: a grant goes out once
+more than three 32 KB packets or more than half the window are unreturned. Against
+OpenSSH's 2 MB window that is nothing, but at 128 KB the window comes back every
+64–96 KB, so on average 32–48 KB has reached the VPS without being returned yet and
+~80–96 KB is left in flight. On two nodes with different round trips a connection held
+the same ~75 KB in flight, the signature of a fixed window — ~20 Mbit/s over a 30 ms
+tunnel; the batches account for most of the gap to 128 KB. That is the single-stream
+figure above. Psiphon keeps the window small on purpose: its client serves one person,
+and a large window lets one bulk download queue ahead of everything else on the shared
+SSH connection.
+
+The launcher sets `SSHChannelWindowSize` to 32 (1 MB). Measured on a test box, exits in
+DE, round trip held at ~30 ms, two runs per value on a different server each time (one
+broken server each at 128 KB and 2 MB left out):
+
+| Window | One connection | Small request, idle → behind 8 downloads |
+|---|---|---|
+| 128 KB (Psiphon's default) | 21 Mbit/s | 100 → 101 ms |
+| 512 KB | 35–45 Mbit/s | 210 → 260, 260 → 265 ms |
+| 1 MB | 110–300 Mbit/s | 99 → 102, 92 → 95 ms |
+| 2 MB | 260–290 Mbit/s | 109 → 160 ms |
+| 4 MB | 65–550 Mbit/s | 95 → 106, 108 → 250 ms |
+
+At 1 MB one connection got several times faster and nothing else waited longer; from
+2 MB a small request behind the downloads began to wait. It matters for whatever moves
+a lot through one connection, and YouTube is the usual case: with QUIC unavailable a
+player typically takes video and audio from one host over one connection. 1080p at 60
+frames runs at roughly 5–9 Mbit/s, and the player keeps a margin above the bitrate it
+picks, so it lands right at the default window's ceiling — ~20 Mbit/s at 30 ms, ~10 at
+60 ms — and drops quality on any slower server. 1440p and 4K sit above that ceiling
+outright. It changes nothing for Gemini, whose answers are small. The watchdog's own fetch rose only
+1.3–1.7x, so its throughput floor keeps its meaning.
 
 ## Pitfalls
 
