@@ -300,14 +300,14 @@ Six rotation triggers, in order of how certain they are:
    exit stays refused. An answer that is neither a reply nor a
    refusal is logged as inconclusive and never rotates.
 
-Only a slow tunnel is judged over a window of checks. Every other trigger is decisive:
+Only a slow tunnel waits for a second failure in a row. Every other trigger is decisive:
 one failure rotates at once, because those do not pass by themselves. Across four
 nodes' logs — two since mid-August, two since early September — the check after a
 failure that did not rotate — ten minutes later, the interval then — found Google's
 verdict about the exit unchanged 173 times out of 173, and a dead or stalled tunnel
 still failing 98 times out of 113, carrying nothing in the meantime. A slow tunnel had
 recovered by then about half the time, 387 times out of 755, and that is what the
-window is for.
+second check is for.
 
 A check during which the tunnel restarted — the installer, `rotate` or `region` — is
 not judged: its readings belong to neither tunnel, and a decisive failure among them
@@ -330,17 +330,20 @@ a rotation — a human solves a captcha in seconds — and the probe that watche
 the same search every ten minutes from the same address, was the most bot-like thing
 the watchdog did.
 
-For a slow tunnel the threshold is 2 failures within the last 3 checks
-(`FAIL_THRESHOLD`, `FAIL_WINDOW`). A window rather than a run of consecutive failures,
-because the tunnel that most needs rotating is the one that is degraded rather than
-dead — and that one passes every other check, which resets a consecutive counter and
-keeps the rotation permanently out of reach. Three checks still catch it, and a tunnel
-that fails every check, while two isolated dips further apart no longer rotate. Of 542
-slow-tunnel rotations on four nodes, 87 came from two failures with two or more passing
-checks between them, and those passing checks read a median of about 1400 KB/s — the
-tunnel was serving. The window used to be five checks; a reinstall moves the old
-default to the new one and keeps a value set by hand. Journal:
-`/var/log/vps-psiphon-watchdog.log`.
+For a slow tunnel the threshold is 2 failures in a row (`FAIL_THRESHOLD`) — a run, not
+a window. At the 800 KB/s floor a degraded tunnel fails every check: the one that once
+made a window necessary read 66, 434, 76, 100 and 89 KB/s, and it passed checks only
+because the floor was 100 then. A passing check between two slow ones is more often
+load swinging in the evening, and a good exit, once rotated away, is hard to win back:
+on one node it took ten rotations to find the next good tunnel, and on a test box two
+of four European exits drawn in one night were ones Google placed in Russia. On the
+first evening of the download test, 3 of 10 slow rotations on four nodes came from a
+failure, a pass and a failure: two on tunnels dying at 119–160 KB/s with first bytes
+taking seconds, one on a tunnel whose failures read 696 and 425 KB/s with a
+sub-second first byte. A run spares the third and keeps the first two one check longer.
+Its cost is a tunnel that alternates, which stays until two failures line up. The
+window used to be five checks, then three; a reinstall drops `FAIL_WINDOW` from the
+settings. Journal: `/var/log/vps-psiphon-watchdog.log`.
 
 Checks run every five minutes, down from ten: a dead tunnel is now seen about two and
 a half minutes after it dies on average, and a slow one is rotated five minutes after
@@ -348,16 +351,13 @@ its first failure instead of ten. Each run fetches YouTube's front page through 
 tunnel, about 800 KB — some 7 GB a month — plus the 4 MB download, about 35 GB a
 month, which is noise next to the users' own YouTube traffic leaving through the same
 exit; the captcha probe was a different matter, an identical search query every time.
-Closer checks also make a short dip more likely to show up twice, which is part of why
-the window is three checks — ten minutes from first failure to last — rather than
-five.
 
-There is no cooldown between rotations. The window starts empty after each rotation,
+There is no cooldown between rotations. The count starts at zero after each rotation,
 so a slow tunnel always gets two checks — about ten minutes — while a decisive
 failure rotates at the first, about five minutes in. An earlier
 version held rotations 30 minutes apart; across five deployments over three weeks that
 cooldown held a rotation back 113 times and prevented none, because the failures that
-asked for it were still in the window when it expired. All it did was keep a known-bad
+asked for it were still counted when it expired. All it did was keep a known-bad
 exit — dead, stalled, or one Google places in a denied country — for a median of ten
 more minutes.
 
@@ -527,7 +527,6 @@ is run as a command.
 |---|---|
 | `MIN_THROUGHPUT_KBPS=800` | throughput floor in KB/s: the rate of the watchdog's download after its first byte, or of the YouTube page at `BULK_TEST_MB=0`. One value for every node; change it only for a node that genuinely cannot reach it. `0` disables the check |
 | `BULK_TEST_MB=4` | size of that download, MB; about 35 GB a month at 4. `0` judges the page instead, at no extra traffic |
-| `FAIL_WINDOW=3` | how many recent checks `FAIL_THRESHOLD` failures are counted over |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first, in every mode; empty disables it |
 | `GEMINI_CHECK_SEC=7200` | seconds between asking Gemini whether it serves the exit; every new tunnel is also asked at its first check. One refusal rotates at once. `0` disables it |

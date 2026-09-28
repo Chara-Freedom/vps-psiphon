@@ -288,7 +288,7 @@ chown -R 1000:1000 "$CONF_DIR"
 
 # Preserve operator-set values across a reinstall. The deny-list is tracked as
 # set-or-not, not by value: a deliberately emptied one must stay empty.
-OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""; OLD_FAIL_WINDOW=""; OLD_GEMINI_CHECK=""; OLD_BULK_TEST=""
+OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""; OLD_GEMINI_CHECK=""; OLD_BULK_TEST=""
 OLD_DENY_SET=0; OLD_DENY_REGIONS=""
 if [ -r "$ENVF" ] && grep -q '^DENY_REGIONS=' "$ENVF"; then
   OLD_DENY_SET=1
@@ -300,9 +300,6 @@ if [ "$DENY_REGIONS_SET" = 0 ]; then
 fi
 if [ -r "$ENVF" ]; then
   OLD_MIN_THROUGHPUT="$(sed -n 's/^MIN_THROUGHPUT_KBPS=//p' "$ENVF")"
-  OLD_FAIL_WINDOW="$(sed -n 's/^FAIL_WINDOW=//p' "$ENVF")"
-  # 5 was the default until the window shrank to 3; only a value set by hand is kept.
-  [ "$OLD_FAIL_WINDOW" = 5 ] && OLD_FAIL_WINDOW=""
   OLD_GEMINI_CHECK="$(sed -n 's/^GEMINI_CHECK_SEC=//p' "$ENVF")"
   OLD_BULK_TEST="$(sed -n 's/^BULK_TEST_MB=//p' "$ENVF")"
   # 8 was the default until it halved to 4; only a value set by hand is kept.
@@ -350,15 +347,14 @@ PUBLISH_HTTP=$PUBLISH_HTTP
 EGRESS_REGION=$EGRESS_REGION
 DEVICE_REGION=$DEVICE_REGION
 CONF_DIR=$CONF_DIR
-# FAIL_THRESHOLD failures within the last FAIL_WINDOW checks rotate a slow tunnel; a
-# dead or stalled tunnel, a country failure and a Gemini refusal rotate at once. A
-# window, not a run: a degraded tunnel flaps around the floor, and a counter reset by
-# every passing check never reaches the threshold. There is no cooldown: the window
-# starts empty after a rotation, so a slow tunnel always gets two checks. A cooldown
-# could only delay a rotation, never prevent one — the failures that asked for it were
-# still in the window when it expired — and the exit it held was a known-bad one.
+# FAIL_THRESHOLD slow checks in a row rotate a slow tunnel; a dead or stalled tunnel,
+# a country failure and a Gemini refusal rotate at once. In a row, not within a window:
+# at the floor a degraded tunnel fails every check, while a passing check between two
+# slow ones is mostly load swinging in the evening — and a good exit, once rotated away,
+# is hard to win back. There is no cooldown: the count starts at zero after a rotation,
+# so a slow tunnel always gets two checks. A cooldown could only delay a rotation, never
+# prevent one, and the exit it held was a known-bad one.
 FAIL_THRESHOLD=2
-FAIL_WINDOW=${OLD_FAIL_WINDOW:-3}
 # Countries to rotate through, space separated; empty keeps rotations inside
 # EGRESS_REGION. A retry then draws on another country's servers.
 REGION_POOL='$REGION_POOL'
@@ -619,7 +615,7 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #      busy tunnel is logged but not read as slowness; at 0, on the YouTube page.
 #   6. Gemini refuses    — asked at the first check of every new tunnel, then every
 #      GEMINI_CHECK_SEC; Gemini keeps a geo-check of its own. Error 1060 rotates at
-#      once, past the failure window.
+#      once, without waiting for a second failure.
 set -uo pipefail
 . /etc/default/vps-psiphon
 LOG=/var/log/vps-psiphon-watchdog.log
@@ -628,7 +624,7 @@ S=(--socks5-hostname "${BIND:-127.0.0.1}:${SOCKS_PORT}")
 touch "$LOG" 2>/dev/null
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
-fails=0; window=""; last_gemini=0; gemini_tunnel=""
+fails=0; last_gemini=0; gemini_tunnel=""
 [ -r "$STATE" ] && . "$STATE"
 now=$(date +%s)
 
@@ -706,8 +702,8 @@ if [ "$started" != "$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-vps-psip
   exit 0
 fi
 
-# Only a slow reading can be a passing dip, so only it waits for the window. A dead or
-# stalled tunnel and a country failure rotate at once: in four nodes' logs the next
+# Only a slow reading can be a passing dip, so only it waits for a second one in a row.
+# A dead or stalled tunnel and a country failure rotate at once: in four nodes' logs the next
 # check found Google's verdict unchanged 173 times out of 173 and a dead or stalled
 # tunnel still failing 98 times out of 113 — carrying nothing meanwhile — while a slow
 # one had recovered 387 times out of 755.
@@ -734,15 +730,11 @@ fi
 
 if [ -z "$reason" ]; then
   [ "$fails" -gt 0 ] && log "recovered (exit $(curl -s --max-time 15 "${S[@]}" https://api.ipify.org 2>/dev/null), country ${gl:-?})"
-  window="${window}0"
+  fails=0
 else
-  window="${window}1"
+  fails=$(( fails + 1 ))
 fi
-# Trimmed only when longer than the window: in bash an offset larger than the string
-# yields the EMPTY string, which would silently forget every failure.
-[ "${#window}" -gt "${FAIL_WINDOW:-3}" ] && window="${window: -${FAIL_WINDOW:-3}}"
-ones="${window//0/}"; fails="${#ones}"
-[ -n "$reason" ] && log "check failed ($reason), $fails of the last ${#window} checks"
+[ -n "$reason" ] && log "check failed ($reason), $fails in a row"
 [ -n "$kbps" ] && log "throughput ${kbps} KB/s (country ${gl:-?}, server ${sr:-?})${bulk:+; $bulk}${t204:+; generate_204 in ${t204}s}"
 
 if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] || [ "$decisive" = 1 ]; then
@@ -754,11 +746,11 @@ if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] || [ "$decisive" = 1 ]; then
   sleep 45
   new="$(curl -s --max-time 20 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
   log "rotated: $old -> $new"
-  fails=0; window=""
+  fails=0
 fi
 
-printf "fails=%s\nwindow=%s\nlast_gemini=%s\ngemini_tunnel='%s'\n" \
-       "$fails" "$window" "$last_gemini" "$gemini_tunnel" > "$STATE"
+printf "fails=%s\nlast_gemini=%s\ngemini_tunnel='%s'\n" \
+       "$fails" "$last_gemini" "$gemini_tunnel" > "$STATE"
 WD
 chmod 755 /usr/local/sbin/vps-psiphon-watchdog
 touch /var/log/vps-psiphon-watchdog.log
@@ -942,6 +934,8 @@ systemctl daemon-reload
 systemctl enable vps-psiphon.service >/dev/null 2>&1
 # restart, not "enable --now": on a reinstall the service is already active and would
 # keep running with the previous parameters.
+# The restart brings a fresh tunnel: failures counted against the old one do not carry over.
+rm -f /var/lib/vps-psiphon-watchdog.state
 systemctl restart vps-psiphon.service
 [ "$WATCHDOG" = 1 ] && systemctl enable --now vps-psiphon-watchdog.timer
 
