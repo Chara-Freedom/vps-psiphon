@@ -39,6 +39,7 @@ PUBLISH_HTTP=1
 # and in every mode; a false positive costs one rotation.
 DENY_REGIONS_DEFAULT="RU BY IR SY CU KP CN VE"
 DENY_REGIONS=""; DENY_REGIONS_SET=0
+BULK_TEST_MB=""; BULK_TEST_SET=0
 
 CONF_DIR=/opt/vps-psiphon/config
 ENVF=/etc/default/vps-psiphon
@@ -69,6 +70,11 @@ psiphon_install.sh [options]
   --deny-regions 'CC…' countries the exit must never be in, space or comma
                        separated. Default: RU BY IR SY CU KP CN VE. Checked in
                        every mode, before anything else. Empty disables it.
+  --bulk-test-mb N     size of the watchdog's throughput download, MB, default 8:
+                       about 70 GB a month through the tunnel. 0 judges the rate
+                       of the YouTube page instead, at no extra traffic — for a
+                       host with metered or scarce traffic. Remembered across
+                       reinstalls.
   --bind ADDR          host address to publish the SOCKS5 on. Default: the
                        docker0 gateway (usually 172.17.0.1), where the kernel
                        DNATs the traffic. On loopback it cannot, and docker-proxy
@@ -98,6 +104,9 @@ while [ $# -gt 0 ]; do
     --deny-regions)
       DENY_REGIONS="$(printf '%s' "${2:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
       DENY_REGIONS_SET=1; shift 2 ;;
+    --bulk-test-mb)
+      case "${2:-}" in ''|*[!0-9]*) echo "--bulk-test-mb takes a whole number of MB" >&2; exit 1 ;; esac
+      BULK_TEST_MB="$2"; BULK_TEST_SET=1; shift 2 ;;
     --bind)          BIND="${2:?}";          shift 2 ;;
     --bind-loopback) BIND=127.0.0.1;         shift   ;;
     --image)         IMAGE="${2:?}";         shift 2 ;;
@@ -279,7 +288,7 @@ chown -R 1000:1000 "$CONF_DIR"
 
 # Preserve operator-set values across a reinstall. The deny-list is tracked as
 # set-or-not, not by value: a deliberately emptied one must stay empty.
-OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""; OLD_FAIL_WINDOW=""; OLD_GEMINI_CHECK=""
+OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""; OLD_FAIL_WINDOW=""; OLD_GEMINI_CHECK=""; OLD_BULK_TEST=""
 OLD_DENY_SET=0; OLD_DENY_REGIONS=""
 if [ -r "$ENVF" ] && grep -q '^DENY_REGIONS=' "$ENVF"; then
   OLD_DENY_SET=1
@@ -295,9 +304,11 @@ if [ -r "$ENVF" ]; then
   # 5 was the default until the window shrank to 3; only a value set by hand is kept.
   [ "$OLD_FAIL_WINDOW" = 5 ] && OLD_FAIL_WINDOW=""
   OLD_GEMINI_CHECK="$(sed -n 's/^GEMINI_CHECK_SEC=//p' "$ENVF")"
+  OLD_BULK_TEST="$(sed -n 's/^BULK_TEST_MB=//p' "$ENVF")"
   OLD_REGION_POOL="$(sed -n 's/^REGION_POOL=//p' "$ENVF" | tr -d "'")"
   [ "$REGION_POOL_SET" = 1 ] || REGION_POOL="$OLD_REGION_POOL"
 fi
+[ "$BULK_TEST_SET" = 1 ] || BULK_TEST_MB="${OLD_BULK_TEST:-8}"
 
 # A country both requested and denied rotates forever.
 for r in ${EGRESS_REGION:-} ${REGION_POOL:-}; do
@@ -352,12 +363,21 @@ REGION_POOL='$REGION_POOL'
 # Countries the exit must never be in, per Google's verdict. Checked first, in every
 # mode. Empty disables it.
 DENY_REGIONS='$DENY_REGIONS'
-# Minimum throughput, KB/s, of the watchdog's own YouTube fetch; 0 disables. One floor
-# for every node: 800 came from replaying three nodes' logged history through the
-# window rule — none would have rotated at 800, the slowest twice at 1000 — while a
-# real collapse trips it on the second check at 600 and at 1000 alike. Lower it only
-# for a node whose own history shows it cannot reach it.
+# Minimum throughput, KB/s; 0 disables. It judges the download below, counted from its
+# first byte on, or at BULK_TEST_MB=0 the YouTube page. One floor for every node: on the
+# page, 800 came from replaying three nodes' logged history through the window rule —
+# none would have rotated at 800, the slowest twice at 1000 — while a real collapse
+# trips it on the second check at 600 and at 1000 alike. Lower it only for a node whose
+# own history shows it cannot reach it.
 MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-800}
+# Size, MB, of the watchdog's throughput download — part of a large file on Google's own
+# download host. A busy tunnel queues: every first byte waits, seconds at times, while a
+# download that is already flowing still runs fast. A page smaller than one connection's
+# window arrives in a round trip or two and reads that wait as slowness; a download
+# larger than the window measures the rate itself. The wait is logged, not judged. About
+# 70 GB a month at 8 MB every 5 minutes; 0 judges the YouTube page instead, at no extra
+# traffic — for a host whose traffic is metered or scarce.
+BULK_TEST_MB=$BULK_TEST_MB
 # Seconds between asking Gemini itself whether it serves the exit — one anonymous
 # message, about 1 MB; every new tunnel is also asked at its first check. Gemini keeps
 # a geo-check of its own that no country check sees. A refusal rotates at once; an
@@ -591,6 +611,8 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #   5. slow tunnel       — the exit carries almost nothing. Psiphon picks its server
 #      per tunnel, so a bad pick stays until something forces a reconnect. Judged
 #      from the first check, ~5 minutes into a tunnel; the ramp takes a minute or two.
+#      Measured on a download of BULK_TEST_MB after its first byte, so a queue in a
+#      busy tunnel is logged but not read as slowness; at 0, on the YouTube page.
 #   6. Gemini refuses    — asked at the first check of every new tunnel, then every
 #      GEMINI_CHECK_SEC; Gemini keeps a geo-check of its own. Error 1060 rotates at
 #      once, past the failure window.
@@ -611,16 +633,16 @@ now=$(date +%s)
 # them would rotate the fresh one for nothing, so such a check is not judged.
 started="$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-vps-psiphon}" 2>/dev/null)"
 
-alive=0
+alive=0; t204=""
 # Retry once, so a check racing a (re)start does not log a failure that never was.
 for attempt in 1 2; do
-  code="$(curl -s -o /dev/null --max-time 20 "${S[@]}" -w '%{http_code}' \
+  r204="$(curl -s -o /dev/null --max-time 20 "${S[@]}" -w '%{http_code} %{time_total}' \
           https://www.gstatic.com/generate_204 2>/dev/null || true)"
-  [ "$code" = "204" ] && { alive=1; break; }
+  [ "${r204%% *}" = "204" ] && { alive=1; t204="${r204##* }"; break; }
   [ "$attempt" = 1 ] && sleep 15
 done
 
-reason=""; gl=""; sr=""; kbps=""
+reason=""; gl=""; sr=""; kbps=""; bulk=""
 if [ "$alive" = 0 ]; then
   reason="socks-dead"
 else
@@ -646,6 +668,25 @@ else
   fi
   if [ -z "$reason" ] && [ "$ytcode" = "000" ]; then
     reason="stalled-tunnel (no HTTP response in 25s while SOCKS answered)"
+  fi
+  # The rate the floor judges: part of a large download, counted from its first byte.
+  # A busy tunnel queues — every first byte may wait seconds — while a download already
+  # flowing still runs fast; the page, smaller than one connection's window, arrives in
+  # a round trip or two and would read that wait as slowness. If the download itself is
+  # unavailable, the page is judged, so an outage on Google's side cannot rotate forever.
+  if [ -z "$reason" ] && [ "${BULK_TEST_MB:-0}" -gt 0 ]; then
+    read -r bcode bgot bfirst btotal <<<"$(curl -s -o /dev/null --max-time 25 "${S[@]}" \
+      -r "0-$(( BULK_TEST_MB * 1048576 - 1 ))" \
+      -w '%{http_code} %{size_download} %{time_starttransfer} %{time_total}' \
+      https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb 2>/dev/null)"
+    case "${bcode:-000}" in
+      200|206)
+        bkbps="$(awk -v s="${bgot:-0}" -v f="${bfirst:-0}" -v t="${btotal:-0}" \
+                 'BEGIN { d = t - f; print ((d > 0 && s > 0) ? int(s / d / 1024) : 0) }')"
+        bulk="download $(( ${bgot:-0} / 1024 )) KB at ${bkbps} KB/s after the first byte (${bfirst}s), page ${kbps} KB/s"
+        kbps="$bkbps" ;;
+      *) bulk="download unavailable (HTTP ${bcode:-000}), the page judged" ;;
+    esac
   fi
   # A partial download still counts once it carries enough bytes for a rate to mean
   # anything — a truncated fetch is itself a symptom.
@@ -698,7 +739,7 @@ fi
 [ "${#window}" -gt "${FAIL_WINDOW:-3}" ] && window="${window: -${FAIL_WINDOW:-3}}"
 ones="${window//0/}"; fails="${#ones}"
 [ -n "$reason" ] && log "check failed ($reason), $fails of the last ${#window} checks"
-[ -n "$kbps" ] && log "throughput ${kbps} KB/s (country ${gl:-?}, server ${sr:-?})"
+[ -n "$kbps" ] && log "throughput ${kbps} KB/s (country ${gl:-?}, server ${sr:-?})${bulk:+; $bulk}${t204:+; generate_204 in ${t204}s}"
 
 if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] || [ "$decisive" = 1 ]; then
   old="$(curl -s --max-time 15 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"

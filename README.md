@@ -86,6 +86,7 @@ Requires root, docker and curl.
 | `--no-http` | — | do not publish the HTTP proxy at all; remembered across reinstalls |
 | `--http` | — | publish it after all — undoes a stored `--no-http` |
 | `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked first, in every mode. Empty disables it |
+| `--bulk-test-mb N` | 8 | size of the watchdog's throughput download, MB — about 70 GB a month at 8. `0` judges the YouTube page instead, at no extra traffic, for a host whose traffic is metered or scarce. Remembered across reinstalls |
 | `--bind ADDR` | docker0 gateway | host address the ports are published on |
 | `--bind-loopback` | — | publish on `127.0.0.1` instead of the gateway |
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
@@ -240,9 +241,20 @@ Six rotation triggers, in order of how certain they are:
 5. **slow tunnel** — the exit answers, from the right country, and carries almost
    nothing. Psiphon picks its server once per tunnel, so a bad pick persists until
    something forces a reconnect, and both checks above stay green the whole time.
-   The rate is measured on the country check's own fetch, so it costs no extra
-   traffic; below `MIN_THROUGHPUT_KBPS` counts as a failure. Every check logs its
-   rate, which is what makes a gradual decline visible at all.
+   The rate is measured on part of a large file from Google's own download host
+   (`BULK_TEST_MB`, 8 MB by default), counted from its first byte on; below
+   `MIN_THROUGHPUT_KBPS` counts as a failure. The first byte is left out on purpose.
+   A busy tunnel queues: a new request may wait seconds for its first byte while a
+   download that is already flowing still runs fast — a page loads a little late, a
+   video keeps its quality. The YouTube page, which the country check fetches anyway,
+   is smaller than one connection's window and arrives in a round trip or two, so its
+   rate is mostly that wait: it reads a queue as slowness. The page's rate and the time
+   `generate_204` took are still logged with every check, so a queue stays visible; it
+   is just not judged. If the download itself cannot be fetched, the page is judged
+   instead, so an outage on Google's side cannot rotate the tunnel forever. At 8 MB
+   every five minutes it costs about 70 GB a month; `--bulk-test-mb 0` returns to
+   judging the page, at no extra traffic. Every check logs its rate, which is what
+   makes a gradual decline visible at all.
 
    The floor is one number for every node, and 800 KB/s is where measurement put it:
    replaying three nodes' own logged history (~40 hours each, medians 1765 / 1987 /
@@ -478,7 +490,8 @@ is run as a command.
 
 | Setting | Effect |
 |---|---|
-| `MIN_THROUGHPUT_KBPS=800` | throughput floor in KB/s, measured on the watchdog's own fetch. One value for every node; change it only for a node that genuinely cannot reach it. `0` disables the check |
+| `MIN_THROUGHPUT_KBPS=800` | throughput floor in KB/s: the rate of the watchdog's download after its first byte, or of the YouTube page at `BULK_TEST_MB=0`. One value for every node; change it only for a node that genuinely cannot reach it. `0` disables the check |
+| `BULK_TEST_MB=8` | size of that download, MB; about 70 GB a month at 8. `0` judges the page instead, at no extra traffic |
 | `FAIL_WINDOW=3` | how many recent checks `FAIL_THRESHOLD` failures are counted over |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first, in every mode; empty disables it |
@@ -549,8 +562,9 @@ player typically takes video and audio from one host over one connection. 1080p 
 frames runs at roughly 5–9 Mbit/s, and the player keeps a margin above the bitrate it
 picks, so it lands right at the default window's ceiling — ~20 Mbit/s at 30 ms, ~10 at
 60 ms — and drops quality on any slower server. 1440p and 4K sit above that ceiling
-outright. It changes nothing for Gemini, whose answers are small. The watchdog's own fetch rose only
-1.3–1.7x, so its throughput floor keeps its meaning.
+outright. It changes nothing for Gemini, whose answers are small. The YouTube page the watchdog fetches rose only
+1.3–1.7x: it is smaller than the window, which is also why the watchdog now judges a
+larger download instead — see the slow-tunnel check.
 
 ## Pitfalls
 
