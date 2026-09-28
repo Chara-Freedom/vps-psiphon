@@ -254,18 +254,36 @@ Six rotation triggers, in order of how certain they are:
    instead, so an outage on Google's side cannot rotate the tunnel forever. At 8 MB
    every five minutes it costs about 70 GB a month; `--bulk-test-mb 0` returns to
    judging the page, at no extra traffic. Every check logs its rate, which is what
-   makes a gradual decline visible at all.
+   makes a gradual decline visible at all. A check reads, in one line of the journal:
 
-   The floor is one number for every node, and 800 KB/s is where measurement put it:
-   replaying three nodes' own logged history (~40 hours each, medians 1765 / 1987 /
-   3079 KB/s) through the window rule, 800 causes no rotation on any of them while
-   1000 costs the slowest two and 1200 five — and a real collapse is caught on the
-   second check either way. What made the old default of 100 useless was its distance
-   from reality: a working tunnel reads in the thousands, so a fifteen-fold collapse
-   passed for health. A new tunnel is judged from its first check, about five minutes
-   in; its ramp takes a minute or two. An earlier version excused that reading; across
-   four nodes over five weeks, with checks then ten minutes apart, of 276 tunnels with
-   a slow first reading the excuse changed nothing for 28, spared 22 that went on to
+   ```
+   throughput 1353 KB/s (country DE, server DE); download 8192 KB at 1353 KB/s after
+   the first byte (1.03s), page 270 KB/s; generate_204 in 1.2s
+   ```
+
+   The numbers are real — one tunnel, measured the way the watchdog measures now — and
+   they are why the page was replaced: the old test rotated this tunnel for a page at
+   353 and 514 KB/s, while a download through it ran at 1353 KB/s — about 11 Mbit/s,
+   enough for 1080p — behind a first byte that waited a second. The same evening
+   another tunnel was rotated for a page at 208 and 291 KB/s while downloads through
+   it read 3324 and 4045 KB/s and `generate_204` came back in 0.06–0.20 s. The
+   download does not excuse a genuinely starved tunnel: on another node the same
+   evening, three tunnels in a row gave a download 22–203 KB/s after its first byte,
+   and those are rotated under either test.
+
+   The floor is one number for every node, 800 KB/s. On the download it means that one
+   connection sustains about 6.4 Mbit/s — roughly what 1080p needs. It was first
+   fitted on the page: replaying three nodes' own logged history (~40 hours each,
+   medians 1765 / 1987 / 3079 KB/s) through the window rule, 800 caused no rotation on
+   any of them while 1000 cost the slowest two and 1200 five — and a real collapse is
+   caught on the second check either way. A healthy tunnel downloads in the thousands
+   of KB/s to the tens of thousands, so the floor sits no closer to health than it
+   did. What made the old default of 100 useless was its distance from reality: a
+   working tunnel reads in the thousands, so a fifteen-fold collapse passed for
+   health. A new tunnel is judged from its first check, about five minutes in; its
+   ramp takes a minute or two. An earlier version excused that reading; across four
+   nodes over five weeks, with checks then ten minutes apart, of 276 tunnels with a
+   slow first reading the excuse changed nothing for 28, spared 22 that went on to
    serve, and kept 226 that were rotated anyway one check longer — ten minutes each,
    45 hours in all.
 6. **Gemini refuses** — asked directly: once for every new tunnel, at its first check
@@ -291,6 +309,17 @@ not judged: its readings belong to neither tunnel, and a decisive failure among 
 would rotate the fresh one for nothing. The journal says so and the counters stay as
 they were.
 
+Psiphon replaces a tunnel on its own when the connection to its server drops: within
+the same container and the same country, in about twenty seconds. That is why
+`recovered` can name a different exit with no rotation in between. It sees only a
+dropped connection, though — not a slow exit, a wrong country or a Gemini refusal —
+which is what the watchdog is for. A check that coincides with such a replacement
+reads the dying tunnel: its requests hang until Psiphon cuts them, the check ends that
+same second, usually as a slow reading with `gemini: inconclusive (no reply)`, and
+that failure is counted against the next tunnel. On one node it did not happen once in
+48 hours; on a bad evening it happened twice across four nodes, and neither time was a
+serving tunnel rotated, so it is left as it is.
+
 Google's captcha wall (`302 → /sorry/index`) is not probed at all. It never justified
 a rotation — a human solves a captcha in seconds — and the probe that watched for it,
 the same search every ten minutes from the same address, was the most bot-like thing
@@ -311,11 +340,12 @@ default to the new one and keeps a value set by hand. Journal:
 Checks run every five minutes, down from ten: a dead tunnel is now seen about two and
 a half minutes after it dies on average, and a slow one is rotated five minutes after
 its first failure instead of ten. Each run fetches YouTube's front page through the
-tunnel, about 800 KB — some 7 GB a month — which is noise next to the users' own
-YouTube traffic leaving through the same exit; the captcha probe was a different matter,
-an identical search query every time. Closer checks also make a short dip more likely
-to show up twice, which is part of why the window is three checks — ten minutes from
-first failure to last — rather than five.
+tunnel, about 800 KB — some 7 GB a month — plus the 8 MB download, about 70 GB a
+month, which is noise next to the users' own YouTube traffic leaving through the same
+exit; the captcha probe was a different matter, an identical search query every time.
+Closer checks also make a short dip more likely to show up twice, which is part of why
+the window is three checks — ten minutes from first failure to last — rather than
+five.
 
 There is no cooldown between rotations. The window starts empty after each rotation,
 so a slow tunnel always gets two checks — about ten minutes — while a decisive
