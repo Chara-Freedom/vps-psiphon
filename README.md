@@ -86,7 +86,7 @@ Requires root, docker and curl.
 | `--no-http` | — | do not publish the HTTP proxy at all; remembered across reinstalls |
 | `--http` | — | publish it after all — undoes a stored `--no-http` |
 | `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked first, in every mode. Empty disables it |
-| `--bulk-test-mb N` | 8 | size of the watchdog's throughput download, MB — about 70 GB a month at 8. `0` judges the YouTube page instead, at no extra traffic, for a host whose traffic is metered or scarce. Remembered across reinstalls |
+| `--bulk-test-mb N` | 4 | size of the watchdog's throughput download, MB — about 35 GB a month at 4. `0` judges the YouTube page instead, at no extra traffic, for a host whose traffic is metered or scarce. Remembered across reinstalls |
 | `--bind ADDR` | docker0 gateway | host address the ports are published on |
 | `--bind-loopback` | — | publish on `127.0.0.1` instead of the gateway |
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
@@ -242,24 +242,29 @@ Six rotation triggers, in order of how certain they are:
    nothing. Psiphon picks its server once per tunnel, so a bad pick persists until
    something forces a reconnect, and both checks above stay green the whole time.
    The rate is measured on part of a large file from Google's own download host
-   (`BULK_TEST_MB`, 8 MB by default), counted from its first byte on; below
-   `MIN_THROUGHPUT_KBPS` counts as a failure. The first byte is left out on purpose.
-   A busy tunnel queues: a new request may wait seconds for its first byte while a
+   (`BULK_TEST_MB`, 4 MB by default), counted from its first byte on; below
+   `MIN_THROUGHPUT_KBPS` counts as a failure. The first byte is left out on purpose. A
+   busy tunnel queues: a new request may wait seconds for its first byte while a
    download that is already flowing still runs fast — a page loads a little late, a
    video keeps its quality. The YouTube page, which the country check fetches anyway,
    is smaller than one connection's window and arrives in a round trip or two, so its
-   rate is mostly that wait: it reads a queue as slowness. The page's rate and the time
-   `generate_204` took are still logged with every check, so a queue stays visible; it
-   is just not judged. If the download itself cannot be fetched, the page is judged
-   instead, so an outage on Google's side cannot rotate the tunnel forever. At 8 MB
-   every five minutes it costs about 70 GB a month; `--bulk-test-mb 0` returns to
-   judging the page, at no extra traffic. Every check logs its rate, which is what
-   makes a gradual decline visible at all. A check reads, in one line of the journal:
+   rate is mostly that wait: it reads a queue as slowness. The page's rate and the
+   time `generate_204` took are still logged with every check, so a queue stays
+   visible; it is just not judged. If the download itself cannot be fetched, the page
+   is judged instead, so an outage on Google's side cannot rotate the tunnel forever.
+   4 MB is four windows of one connection: the download outlives several turns of its
+   window, so a round trip stretched by a queue caps it as it would cap a video, and
+   at the floor it still takes about five seconds. At 4 MB every five minutes it costs
+   about 35 GB a month; `--bulk-test-mb 0` returns to judging the page, at no extra
+   traffic. Every check logs its rate, which is what makes a gradual decline visible
+   at all. A check reads, in one line of the journal:
 
    ```
    throughput 1353 KB/s (country DE, server DE); download 8192 KB at 1353 KB/s after
    the first byte (1.03s), page 270 KB/s; generate_204 in 1.2s
    ```
+
+   (taken at 8 MB, the first default; the default is now 4)
 
    The numbers are real — one tunnel, measured the way the watchdog measures now — and
    they are why the page was replaced: the old test rotated this tunnel for a page at
@@ -340,7 +345,7 @@ default to the new one and keeps a value set by hand. Journal:
 Checks run every five minutes, down from ten: a dead tunnel is now seen about two and
 a half minutes after it dies on average, and a slow one is rotated five minutes after
 its first failure instead of ten. Each run fetches YouTube's front page through the
-tunnel, about 800 KB — some 7 GB a month — plus the 8 MB download, about 70 GB a
+tunnel, about 800 KB — some 7 GB a month — plus the 4 MB download, about 35 GB a
 month, which is noise next to the users' own YouTube traffic leaving through the same
 exit; the captcha probe was a different matter, an identical search query every time.
 Closer checks also make a short dip more likely to show up twice, which is part of why
@@ -521,7 +526,7 @@ is run as a command.
 | Setting | Effect |
 |---|---|
 | `MIN_THROUGHPUT_KBPS=800` | throughput floor in KB/s: the rate of the watchdog's download after its first byte, or of the YouTube page at `BULK_TEST_MB=0`. One value for every node; change it only for a node that genuinely cannot reach it. `0` disables the check |
-| `BULK_TEST_MB=8` | size of that download, MB; about 70 GB a month at 8. `0` judges the page instead, at no extra traffic |
+| `BULK_TEST_MB=4` | size of that download, MB; about 35 GB a month at 4. `0` judges the page instead, at no extra traffic |
 | `FAIL_WINDOW=3` | how many recent checks `FAIL_THRESHOLD` failures are counted over |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first, in every mode; empty disables it |

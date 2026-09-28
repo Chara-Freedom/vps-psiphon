@@ -70,8 +70,8 @@ psiphon_install.sh [options]
   --deny-regions 'CC…' countries the exit must never be in, space or comma
                        separated. Default: RU BY IR SY CU KP CN VE. Checked in
                        every mode, before anything else. Empty disables it.
-  --bulk-test-mb N     size of the watchdog's throughput download, MB, default 8:
-                       about 70 GB a month through the tunnel. 0 judges the rate
+  --bulk-test-mb N     size of the watchdog's throughput download, MB, default 4:
+                       about 35 GB a month through the tunnel. 0 judges the rate
                        of the YouTube page instead, at no extra traffic — for a
                        host with metered or scarce traffic. Remembered across
                        reinstalls.
@@ -305,10 +305,12 @@ if [ -r "$ENVF" ]; then
   [ "$OLD_FAIL_WINDOW" = 5 ] && OLD_FAIL_WINDOW=""
   OLD_GEMINI_CHECK="$(sed -n 's/^GEMINI_CHECK_SEC=//p' "$ENVF")"
   OLD_BULK_TEST="$(sed -n 's/^BULK_TEST_MB=//p' "$ENVF")"
+  # 8 was the default until it halved to 4; only a value set by hand is kept.
+  [ "$OLD_BULK_TEST" = 8 ] && OLD_BULK_TEST=""
   OLD_REGION_POOL="$(sed -n 's/^REGION_POOL=//p' "$ENVF" | tr -d "'")"
   [ "$REGION_POOL_SET" = 1 ] || REGION_POOL="$OLD_REGION_POOL"
 fi
-[ "$BULK_TEST_SET" = 1 ] || BULK_TEST_MB="${OLD_BULK_TEST:-8}"
+[ "$BULK_TEST_SET" = 1 ] || BULK_TEST_MB="${OLD_BULK_TEST:-4}"
 
 # A country both requested and denied rotates forever.
 for r in ${EGRESS_REGION:-} ${REGION_POOL:-}; do
@@ -374,9 +376,11 @@ MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-800}
 # download host. A busy tunnel queues: every first byte waits, seconds at times, while a
 # download that is already flowing still runs fast. A page smaller than one connection's
 # window arrives in a round trip or two and reads that wait as slowness; a download
-# larger than the window measures the rate itself. The wait is logged, not judged. About
-# 70 GB a month at 8 MB every 5 minutes; 0 judges the YouTube page instead, at no extra
-# traffic — for a host whose traffic is metered or scarce.
+# larger than the window measures the rate itself. The wait is logged, not judged. 4 MB
+# is four windows: the flow outlives several turns of its window, so a round trip
+# stretched by a queue caps it as it would cap a video — and at the floor it still takes
+# about five seconds. About 35 GB a month at 4 MB every 5 minutes; 0 judges the YouTube
+# page instead, at no extra traffic — for a host whose traffic is metered or scarce.
 BULK_TEST_MB=$BULK_TEST_MB
 # Seconds between asking Gemini itself whether it serves the exit — one anonymous
 # message, about 1 MB; every new tunnel is also asked at its first check. Gemini keeps
