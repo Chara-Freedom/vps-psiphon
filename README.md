@@ -547,13 +547,17 @@ subscription is not needed to lift a limit that is not applied.
 | 8 streams aggregate | 196 Mbit/s on one German exit, 53 on another |
 | Upload, 4 streams | 62 Mbit/s |
 | TTFB to DE/NL | 0.12 s |
-| TTFB to SG | 1.11 s — a single stream fell to 1.6 Mbit/s purely from RTT, see [The window per connection](#the-window-per-connection) |
+| TTFB to SG | 0.8–1.1 s. One connection carried 1.6 Mbit/s at Psiphon's default window and 3.3–3.7 MB/s — about 28 Mbit/s — at the current 1 MB one, see [The window per connection](#the-window-per-connection) |
 | Reconnects | none across the whole run, exit IP never changed |
 | UDP | `UDP ASSOCIATE` → `REP=7 COMMAND NOT SUPPORTED`; `CONNECT` → `REP=0` |
 
-Exit region affects throughput more than anything else: from Europe, DE versus SG
-differs by more than tenfold. The individual server within a region matters too —
-aggregate differed fourfold between two German exits.
+Exit region sets the ceiling of one connection, since that ceiling is the window over
+the round trip. Measured from Europe at the 1 MB window, one connection carried
+25–31 MB/s through NL and FR exits, 5.6–9.5 MB/s through US exits and 3.3–3.7 MB/s
+through SG, each over a TCP tunnel: a far region costs speed, but at this window it no
+longer makes an exit unusable, as it did at 128 KB. Tunnels over UDP ran slower than
+that in the same night — 2.2–6.9 MB/s to the US. The individual server within a region
+matters too — aggregate differed fourfold between two German exits.
 
 ### The window per connection
 
