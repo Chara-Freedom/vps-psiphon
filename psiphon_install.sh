@@ -7,7 +7,8 @@
 # and handed to xray through a four-line outbound. systemd owns the lifecycle, and a
 # watchdog rotates the tunnel when the exit stops being usable.
 #
-# Installs:
+# Installs, for the first instance (--instance N adds -N to every name below: each
+# instance is a separate tunnel with its own files, units and CLI):
 #   /etc/default/vps-psiphon                    parameters
 #   /usr/local/sbin/vps-psiphon-run             container launcher (systemd ExecStart)
 #   /usr/local/sbin/vps-psiphon-prestart        clears an orphaned docker-proxy (ExecStartPre)
@@ -24,12 +25,10 @@
 set -euo pipefail
 
 IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
-NAME="${NAME:-vps-psiphon}"
+INSTANCE=1
 # Chosen after preflight: the default address exists only once docker is running.
 BIND="${BIND:-}"
 
-SOCKS_PORT="${SOCKS_PORT:-1080}"
-HTTP_PORT="${HTTP_PORT:-8080}"
 EGRESS_REGION="${EGRESS_REGION:-}"
 REGION_POOL=""; REGION_POOL_SET=0
 DEVICE_REGION="${DEVICE_REGION:-}"
@@ -41,8 +40,6 @@ DENY_REGIONS_DEFAULT="RU BY IR SY CU KP CN VE"
 DENY_REGIONS=""; DENY_REGIONS_SET=0
 BULK_TEST_MB=""; BULK_TEST_SET=0
 
-CONF_DIR=/opt/vps-psiphon/config
-ENVF=/etc/default/vps-psiphon
 # Ports asked for explicitly are honoured or refused, never silently moved.
 SOCKS_PORT_SET=0
 HTTP_PORT_SET=0
@@ -60,6 +57,10 @@ psiphon_install.sh [options]
                        CA CH CZ DE DK ES FR GB ID IE IN IT JP NL NO PL RS SE SG US
   --device-region CC   region the client reports. Cosmetic — the server decides
                        by GeoIP. Default: autodetected from this host.
+  --instance N         which tunnel on this host, 1-99, default 1. Each instance is
+                       a separate tunnel with its own exit, watchdog and CLI; N > 1
+                       adds -N to every name (vps-psiphon-2, its units and files),
+                       and its ports default to 1080+N-1 and 8080+N-1.
   --socks-port N       SOCKS5 port for xray, default 1080. Refused if taken —
                        xray's outbound names this port, so it is never moved.
   --http-port N        HTTP proxy port, default 8080. Nothing here consumes it,
@@ -97,6 +98,7 @@ while [ $# -gt 0 ]; do
       [ "$REGION_POOL" = "$EGRESS_REGION" ] && REGION_POOL=""
       REGION_POOL_SET=1; shift 2 ;;
     --device-region) DEVICE_REGION="${2:-}"; shift 2 ;;
+    --instance)      INSTANCE="${2:-}"; shift 2 ;;
     --socks-port)    SOCKS_PORT="${2:?}"; SOCKS_PORT_SET=1; shift 2 ;;
     --http-port)     HTTP_PORT="${2:?}";  HTTP_PORT_SET=1;  shift 2 ;;
     --no-http)       PUBLISH_HTTP=0; PUBLISH_HTTP_SET=1; shift ;;
@@ -118,6 +120,28 @@ done
 
 say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- instance --
+# Every name derives from the prefix, so two instances share nothing but the image.
+# Numbers only: a word could collide with a suffix of the first instance's own files —
+# an instance "watchdog" would own vps-psiphon-watchdog.service.
+case "$INSTANCE" in
+  [1-9]|[1-9][0-9]) ;;
+  *) die "--instance takes a number from 1 to 99" ;;
+esac
+if [ "$INSTANCE" = 1 ]; then P=vps-psiphon; else P="vps-psiphon-$INSTANCE"; fi
+NAME="${NAME:-$P}"
+CONF_DIR="/opt/$P/config"
+ENVF="/etc/default/$P"
+# A second instance must not reach for the first one's ports; a port given with a flag
+# or kept from a previous install of this instance still wins.
+SOCKS_PORT="${SOCKS_PORT:-$((1079 + INSTANCE))}"
+HTTP_PORT="${HTTP_PORT:-$((8079 + INSTANCE))}"
+if [ "$INSTANCE" = 1 ]; then OUT_TAG=psiphon-out; else OUT_TAG="psiphon-out-$INSTANCE"; fi
+
+# Writes stdin to $1 with @P@ replaced by the prefix. The scripts below stay in quoted
+# heredocs — nothing in them expands at install time — and only the prefix is filled in.
+put() { sed "s/@P@/$P/g" > "$1"; }
 
 # ---------------------------------------------------------------- preflight --
 [ "$(id -u)" = 0 ] || die "run as root"
@@ -334,7 +358,7 @@ fi
 # Unquoted heredoc, for the values — so nothing below may contain a backtick or a
 # dollar sign that is not meant to expand.
 cat > "$ENVF" <<EOF
-# vps-psiphon — written by psiphon_install.sh
+# $P — written by psiphon_install.sh
 #
 # NOTE: this file is sourced by the shell, so any value containing spaces MUST be
 # quoted. Unquoted, everything after the first space is run as a command.
@@ -392,11 +416,11 @@ docker image inspect -f '{{index .RepoDigests 0}}' "$IMAGE" 2>/dev/null \
   | sed 's/^/    deployed digest: /' || true
 
 # ---- launcher ---------------------------------------------------------------
-cat > /usr/local/sbin/vps-psiphon-run <<'RUN'
+put "/usr/local/sbin/$P-run" <<'RUN'
 #!/usr/bin/env bash
 # Foreground container launcher; systemd owns the lifecycle.
 set -euo pipefail
-. /etc/default/vps-psiphon
+. /etc/default/@P@
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
 # Psiphon's window per connection, in 32 KB blocks. Its default, 4 (128 KB), caps one
@@ -445,10 +469,10 @@ exec docker run --rm --name "$NAME" \
   -v "${CONF_DIR}:/config" \
   "$IMAGE"
 RUN
-chmod 755 /usr/local/sbin/vps-psiphon-run
+chmod 755 "/usr/local/sbin/$P-run"
 
 # ---- orphaned-proxy sweeper -------------------------------------------------
-cat > /usr/local/sbin/vps-psiphon-prestart <<'PRE'
+put "/usr/local/sbin/$P-prestart" <<'PRE'
 #!/usr/bin/env bash
 # Clear a docker-proxy left behind by a container that died uncleanly.
 #
@@ -469,10 +493,10 @@ cat > /usr/local/sbin/vps-psiphon-prestart <<'PRE'
 # Ports come from the env file. Arguments override them, which is what makes both
 # interesting paths testable without touching a live tunnel.
 set -uo pipefail
-. /etc/default/vps-psiphon
+. /etc/default/@P@
 BIND="${BIND:-127.0.0.1}"
 
-log() { printf 'vps-psiphon-prestart: %s\n' "$*"; }
+log() { printf '@P@-prestart: %s\n' "$*"; }
 
 free_port() {
   local port="$1" line pid cmd
@@ -514,10 +538,10 @@ else
 fi
 exit 0
 PRE
-chmod 755 /usr/local/sbin/vps-psiphon-prestart
+chmod 755 "/usr/local/sbin/$P-prestart"
 
 # ---- region pool ------------------------------------------------------------
-cat > /usr/local/sbin/vps-psiphon-advance-region <<'ADV'
+put "/usr/local/sbin/$P-advance-region" <<'ADV'
 #!/usr/bin/env bash
 # Advance EGRESS_REGION to the next country in REGION_POOL and apply it. Prints
 # "old -> new" when it changes anything, silent when there is no pool.
@@ -525,7 +549,7 @@ cat > /usr/local/sbin/vps-psiphon-advance-region <<'ADV'
 # Applied by editing psiphon.config in place — the image seeds that file only when
 # absent — which keeps the client's cached server list, unlike `vps-psiphon region`.
 set -uo pipefail
-ENVF=/etc/default/vps-psiphon
+ENVF=/etc/default/@P@
 [ -r "$ENVF" ] && . "$ENVF"
 [ -n "${REGION_POOL:-}" ] || exit 0
 
@@ -540,14 +564,14 @@ done
 [ "$nxt" = "$cur" ] && exit 0
 
 sed -i "s/^EGRESS_REGION=.*/EGRESS_REGION=$nxt/" "$ENVF"
-cfg="${CONF_DIR:-/opt/vps-psiphon/config}/psiphon.config"
+cfg="${CONF_DIR:-/opt/@P@/config}/psiphon.config"
 [ -f "$cfg" ] && sed -i -E "s/\"EgressRegion\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"EgressRegion\": \"$nxt\"/" "$cfg"
 printf '%s -> %s\n' "${cur:-auto}" "$nxt"
 ADV
-chmod 0755 /usr/local/sbin/vps-psiphon-advance-region
+chmod 0755 "/usr/local/sbin/$P-advance-region"
 
 # ---- gemini check -----------------------------------------------------------
-cat > /usr/local/sbin/vps-psiphon-gemini-check <<'GEM'
+put "/usr/local/sbin/$P-gemini-check" <<'GEM'
 #!/usr/bin/env bash
 # Asks Gemini itself whether it serves this exit, and prints one line:
 #   exit 0  ok            Gemini replied; the line names the place it puts us in
@@ -559,7 +583,7 @@ cat > /usr/local/sbin/vps-psiphon-gemini-check <<'GEM'
 #   --direct  probe from this host's own address instead of through the tunnel, to
 #             tell a burned exit apart from a refusal that follows the whole host.
 set -uo pipefail
-[ -r /etc/default/vps-psiphon ] && . /etc/default/vps-psiphon
+[ -r /etc/default/@P@ ] && . /etc/default/@P@
 P=(--socks5-hostname "${BIND:-127.0.0.1}:${SOCKS_PORT:-1080}")
 [ "${1:-}" = --direct ] && P=(-4)
 UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
@@ -592,10 +616,10 @@ case " $errs " in
 esac
 echo "inconclusive (no reply${errs:+, error ${errs% }})"; exit 2
 GEM
-chmod 755 /usr/local/sbin/vps-psiphon-gemini-check
+chmod 755 "/usr/local/sbin/$P-gemini-check"
 
 # ---- watchdog ---------------------------------------------------------------
-cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
+put "/usr/local/sbin/$P-watchdog" <<'WD'
 #!/usr/bin/env bash
 # Rotation triggers, in order of how certain they are:
 #   1. tunnel dead       — SOCKS does not answer.
@@ -617,9 +641,9 @@ cat > /usr/local/sbin/vps-psiphon-watchdog <<'WD'
 #      GEMINI_CHECK_SEC; Gemini keeps a geo-check of its own. Error 1060 rotates at
 #      once, without waiting for a second failure.
 set -uo pipefail
-. /etc/default/vps-psiphon
-LOG=/var/log/vps-psiphon-watchdog.log
-STATE=/var/lib/vps-psiphon-watchdog.state
+. /etc/default/@P@
+LOG=/var/log/@P@-watchdog.log
+STATE=/var/lib/@P@-watchdog.state
 S=(--socks5-hostname "${BIND:-127.0.0.1}:${SOCKS_PORT}")
 touch "$LOG" 2>/dev/null
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
@@ -631,7 +655,7 @@ now=$(date +%s)
 # The tunnel this check is about. A restart during the check — the installer, `rotate`,
 # `region` — leaves readings that belong to neither tunnel, and a decisive failure among
 # them would rotate the fresh one for nothing, so such a check is not judged.
-started="$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-vps-psiphon}" 2>/dev/null)"
+started="$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-@P@}" 2>/dev/null)"
 
 alive=0; t204=""
 # Retry once, so a check racing a (re)start does not log a failure that never was.
@@ -656,7 +680,7 @@ else
   rm -f "$ytf"
   kbps=$(( ${spd%%.*} / 1024 ))
   # The server's own country, as Psiphon announced it for the current tunnel.
-  sr="$(docker logs "${NAME:-vps-psiphon}" 2>&1 | grep -oE '"serverRegion":"[A-Z]{2}"' | tail -1 | cut -d'"' -f4)"
+  sr="$(docker logs "${NAME:-@P@}" 2>&1 | grep -oE '"serverRegion":"[A-Z]{2}"' | tail -1 | cut -d'"' -f4)"
   if [ -n "$gl" ]; then
     case " ${DENY_REGIONS:-} " in
       *" $gl "*) reason="denied-country (Google sees $gl — sanctioned or Google-blocked)" ;;
@@ -697,7 +721,7 @@ else
   fi
 fi
 
-if [ "$started" != "$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-vps-psiphon}" 2>/dev/null)" ]; then
+if [ "$started" != "$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-@P@}" 2>/dev/null)" ]; then
   log "check not judged: the tunnel restarted during it${reason:+ (it read: $reason)}"
   exit 0
 fi
@@ -719,7 +743,7 @@ esac
 if [ "$alive" = 1 ] && [ "${GEMINI_CHECK_SEC:-7200}" -gt 0 ] \
    && { { [ -n "$started" ] && [ "$started" != "$gemini_tunnel" ]; } \
         || [ $((now - last_gemini)) -ge "${GEMINI_CHECK_SEC:-7200}" ]; }; then
-  gem="$(/usr/local/sbin/vps-psiphon-gemini-check)"; grc=$?
+  gem="$(/usr/local/sbin/@P@-gemini-check)"; grc=$?
   last_gemini=$now; gemini_tunnel="$started"
   log "gemini: $gem"
   if [ "$grc" = 1 ]; then
@@ -740,9 +764,9 @@ fi
 if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] || [ "$decisive" = 1 ]; then
   old="$(curl -s --max-time 15 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
   log "rotating away from exit $old"
-  moved="$(/usr/local/sbin/vps-psiphon-advance-region 2>/dev/null)"
+  moved="$(/usr/local/sbin/@P@-advance-region 2>/dev/null)"
   [ -n "$moved" ] && log "region $moved"
-  systemctl restart vps-psiphon.service
+  systemctl restart @P@.service
   sleep 45
   new="$(curl -s --max-time 20 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
   log "rotated: $old -> $new"
@@ -752,28 +776,28 @@ fi
 printf "fails=%s\nlast_gemini=%s\ngemini_tunnel='%s'\n" \
        "$fails" "$last_gemini" "$gemini_tunnel" > "$STATE"
 WD
-chmod 755 /usr/local/sbin/vps-psiphon-watchdog
-touch /var/log/vps-psiphon-watchdog.log
+chmod 755 "/usr/local/sbin/$P-watchdog"
+touch "/var/log/$P-watchdog.log"
 
 # ---- management CLI ---------------------------------------------------------
-cat > /usr/local/sbin/vps-psiphon <<'CLI'
+put "/usr/local/sbin/$P" <<'CLI'
 #!/usr/bin/env bash
 set -uo pipefail
 # Sourced defensively, so a half-finished uninstall can still be finished.
-[ -r /etc/default/vps-psiphon ] && . /etc/default/vps-psiphon
+[ -r /etc/default/@P@ ] && . /etc/default/@P@
 IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
-NAME="${NAME:-vps-psiphon}"
+NAME="${NAME:-@P@}"
 SOCKS_PORT="${SOCKS_PORT:-1080}"
 HTTP_PORT="${HTTP_PORT:-8080}"
 PUBLISH_HTTP="${PUBLISH_HTTP:-1}"
-CONF_DIR="${CONF_DIR:-/opt/vps-psiphon/config}"
+CONF_DIR="${CONF_DIR:-/opt/@P@/config}"
 BIND="${BIND:-127.0.0.1}"
 S=(--socks5-hostname "${BIND}:${SOCKS_PORT}")
 
 status() {
   echo "container : $(docker ps --filter "name=^${NAME}$" --format '{{.Status}}' || echo 'DOWN')"
-  echo "service   : $(systemctl is-active vps-psiphon.service) / $(systemctl is-enabled vps-psiphon.service 2>/dev/null)"
-  echo "watchdog  : $(systemctl is-active vps-psiphon-watchdog.timer) / $(systemctl is-enabled vps-psiphon-watchdog.timer 2>/dev/null)"
+  echo "service   : $(systemctl is-active @P@.service) / $(systemctl is-enabled @P@.service 2>/dev/null)"
+  echo "watchdog  : $(systemctl is-active @P@-watchdog.timer) / $(systemctl is-enabled @P@-watchdog.timer 2>/dev/null)"
   echo "socks     : ${BIND}:${SOCKS_PORT}   (region requested: ${EGRESS_REGION:-auto})"
   [ -n "${REGION_POOL:-}" ] && echo "pool      : ${REGION_POOL}   (each rotation advances one step)"
   [ -n "${DENY_REGIONS:-}" ] && echo "deny      : ${DENY_REGIONS}   (rejected in every mode, checked first)"
@@ -798,7 +822,7 @@ status() {
   # Not folded into a default expansion: an apostrophe inside it opens a quote.
   [ -n "$gl_verdict" ] || gl_verdict="Google's own verdict about this exit"
   echo "country   : ${gl:-?}   ($gl_verdict)"
-  echo -n "gemini    : "; /usr/local/sbin/vps-psiphon-gemini-check
+  echo -n "gemini    : "; /usr/local/sbin/@P@-gemini-check
   echo -n "traffic   : "; docker exec "$NAME" cat /proc/net/dev 2>/dev/null | awk '/eth0/{printf "rx %.2f GB / tx %.2f GB\n", $2/1e9, $10/1e9}' || echo 'n/a'
 }
 
@@ -806,17 +830,17 @@ case "${1:-status}" in
   status) status ;;
   rotate)
     echo "rotating (fresh tunnel, new exit)…"
-    moved="$(/usr/local/sbin/vps-psiphon-advance-region 2>/dev/null)"
+    moved="$(/usr/local/sbin/@P@-advance-region 2>/dev/null)"
     [ -n "$moved" ] && echo "region    : $moved"
-    systemctl restart vps-psiphon.service; sleep 45
+    systemctl restart @P@.service; sleep 45
     # advance-region rewrote the env file; re-read it so status shows the new region.
-    [ -r /etc/default/vps-psiphon ] && . /etc/default/vps-psiphon
+    [ -r /etc/default/@P@ ] && . /etc/default/@P@
     status ;;
   pool)
     # An empty string is valid — it clears the pool — so test for a MISSING argument.
-    [ $# -ge 2 ] || { echo "usage: vps-psiphon pool '<CC CC …>'   (empty string clears it)"; exit 1; }
+    [ $# -ge 2 ] || { echo "usage: @P@ pool '<CC CC …>'   (empty string clears it)"; exit 1; }
     np="$(printf '%s' "$2" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
-    sed -i "s/^REGION_POOL=.*/REGION_POOL='$np'/" /etc/default/vps-psiphon
+    sed -i "s/^REGION_POOL=.*/REGION_POOL='$np'/" /etc/default/@P@
     if [ -n "$np" ]; then
       echo "pool      : $np"
       case " $np " in
@@ -828,54 +852,54 @@ case "${1:-status}" in
       echo "pool cleared — rotations stay in ${EGRESS_REGION:-auto}"
     fi ;;
   region)
-    [ -n "${2:-}" ] || { echo "usage: vps-psiphon region <CC|auto>"; exit 1; }
+    [ -n "${2:-}" ] || { echo "usage: @P@ region <CC|auto>"; exit 1; }
     r="$2"; [ "$r" = auto ] && r=""
-    sed -i "s/^EGRESS_REGION=.*/EGRESS_REGION=$r/" /etc/default/vps-psiphon
+    sed -i "s/^EGRESS_REGION=.*/EGRESS_REGION=$r/" /etc/default/@P@
     EGRESS_REGION="$r"
     # The image seeds /config only once; an existing config keeps the OLD region.
     rm -rf "${CONF_DIR:?}"/*; mkdir -p "$CONF_DIR"; chown -R 1000:1000 "$CONF_DIR"
-    systemctl restart vps-psiphon.service; sleep 45; status ;;
+    systemctl restart @P@.service; sleep 45; status ;;
   speed)
     U="https://speed.cloudflare.com/__down?bytes=50000000"
     echo -n "single 50MB : "
     curl -s -o /dev/null --max-time 300 "${S[@]}" -w '%{speed_download}\n' "$U" | awk '{printf "%.1f Mbit/s\n", $1*8/1e6}'
     echo -n "4x parallel : "
-    rm -f /tmp/vpspsi.speed; t0=$(date +%s.%N)
-    for i in 1 2 3 4; do curl -s -o /dev/null --max-time 300 "${S[@]}" -w '%{size_download}\n' "$U" >> /tmp/vpspsi.speed & done
+    rm -f /tmp/@P@.speed; t0=$(date +%s.%N)
+    for i in 1 2 3 4; do curl -s -o /dev/null --max-time 300 "${S[@]}" -w '%{size_download}\n' "$U" >> /tmp/@P@.speed & done
     wait; t1=$(date +%s.%N)
-    awk -v a="$t0" -v b="$t1" '{s+=$1} END{printf "%.1f Mbit/s aggregate\n", s*8/(b-a)/1e6}' /tmp/vpspsi.speed ;;
+    awk -v a="$t0" -v b="$t1" '{s+=$1} END{printf "%.1f Mbit/s aggregate\n", s*8/(b-a)/1e6}' /tmp/@P@.speed ;;
   logs)     docker logs --tail "${2:-50}" "$NAME" ;;
-  watchdog) tail -n "${2:-30}" /var/log/vps-psiphon-watchdog.log ;;
+  watchdog) tail -n "${2:-30}" /var/log/@P@-watchdog.log ;;
   uninstall)
-    systemctl disable --now vps-psiphon-watchdog.timer vps-psiphon-watchdog.service \
-                            vps-psiphon.service >/dev/null 2>&1
+    systemctl disable --now @P@-watchdog.timer @P@-watchdog.service \
+                            @P@.service >/dev/null 2>&1
     docker rm -f "$NAME" >/dev/null 2>&1
-    rm -f /etc/systemd/system/vps-psiphon.service \
-          /etc/systemd/system/vps-psiphon-watchdog.service \
-          /etc/systemd/system/vps-psiphon-watchdog.timer
+    rm -f /etc/systemd/system/@P@.service \
+          /etc/systemd/system/@P@-watchdog.service \
+          /etc/systemd/system/@P@-watchdog.timer
     systemctl daemon-reload
-    systemctl reset-failed vps-psiphon.service vps-psiphon-watchdog.service >/dev/null 2>&1
+    systemctl reset-failed @P@.service @P@-watchdog.service >/dev/null 2>&1
     # Docker refuses while anything else references the image, which is fine.
     docker image rm "$IMAGE" >/dev/null 2>&1
-    rm -f /usr/local/sbin/vps-psiphon-run /usr/local/sbin/vps-psiphon-watchdog \
-          /usr/local/sbin/vps-psiphon-prestart \
-          /usr/local/sbin/vps-psiphon-advance-region /usr/local/sbin/vps-psiphon-gemini-check \
-          /etc/default/vps-psiphon /var/lib/vps-psiphon-watchdog.state \
-          /var/log/vps-psiphon-watchdog.log /tmp/vpspsi.speed
-    rm -rf /opt/vps-psiphon
+    rm -f /usr/local/sbin/@P@-run /usr/local/sbin/@P@-watchdog \
+          /usr/local/sbin/@P@-prestart \
+          /usr/local/sbin/@P@-advance-region /usr/local/sbin/@P@-gemini-check \
+          /etc/default/@P@ /var/lib/@P@-watchdog.state \
+          /var/log/@P@-watchdog.log /tmp/@P@.speed
+    rm -rf /opt/@P@
     # Safe while running: bash holds the inode open.
-    rm -f /usr/local/sbin/vps-psiphon
+    rm -f /usr/local/sbin/@P@
     # "Removed" is claimed only after looking at the disk.
     left=""
-    for p in /usr/local/sbin/vps-psiphon /usr/local/sbin/vps-psiphon-run \
-             /usr/local/sbin/vps-psiphon-prestart \
-             /usr/local/sbin/vps-psiphon-watchdog /usr/local/sbin/vps-psiphon-gemini-check \
-             /usr/local/sbin/vps-psiphon-advance-region /etc/default/vps-psiphon \
-             /etc/systemd/system/vps-psiphon.service \
-             /etc/systemd/system/vps-psiphon-watchdog.service \
-             /etc/systemd/system/vps-psiphon-watchdog.timer \
-             /var/lib/vps-psiphon-watchdog.state \
-             /var/log/vps-psiphon-watchdog.log /opt/vps-psiphon ; do
+    for p in /usr/local/sbin/@P@ /usr/local/sbin/@P@-run \
+             /usr/local/sbin/@P@-prestart \
+             /usr/local/sbin/@P@-watchdog /usr/local/sbin/@P@-gemini-check \
+             /usr/local/sbin/@P@-advance-region /etc/default/@P@ \
+             /etc/systemd/system/@P@.service \
+             /etc/systemd/system/@P@-watchdog.service \
+             /etc/systemd/system/@P@-watchdog.timer \
+             /var/lib/@P@-watchdog.state \
+             /var/log/@P@-watchdog.log /opt/@P@ ; do
       [ -e "$p" ] && left="$left $p"
     done
     docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$NAME" && left="$left container:$NAME"
@@ -883,22 +907,22 @@ case "${1:-status}" in
       && echo "note: image $IMAGE kept, something else on this host references it"
     [ -n "$left" ] && { echo "removed, but these remain:$left" >&2; exit 1; }
     echo "removed: units, container, image, config, state, log — and this CLI itself" ;;
-  *) echo "usage: vps-psiphon {status|rotate|region <CC>|pool '<CC CC …>'|speed|logs [n]|watchdog [n]|uninstall}" ;;
+  *) echo "usage: @P@ {status|rotate|region <CC>|pool '<CC CC …>'|speed|logs [n]|watchdog [n]|uninstall}" ;;
 esac
 CLI
-chmod 755 /usr/local/sbin/vps-psiphon
+chmod 755 "/usr/local/sbin/$P"
 
 # ---- units ------------------------------------------------------------------
-cat > /etc/systemd/system/vps-psiphon.service <<'U1'
+put "/etc/systemd/system/$P.service" <<'U1'
 [Unit]
-Description=vps-psiphon egress tunnel (host-private SOCKS5 for xray)
+Description=@P@ egress tunnel (host-private SOCKS5 for xray)
 After=docker.service network-online.target
 Requires=docker.service
 
 [Service]
-ExecStartPre=/usr/local/sbin/vps-psiphon-prestart
-ExecStart=/usr/local/sbin/vps-psiphon-run
-ExecStop=/usr/bin/docker stop -t 10 vps-psiphon
+ExecStartPre=/usr/local/sbin/@P@-prestart
+ExecStart=/usr/local/sbin/@P@-run
+ExecStop=/usr/bin/docker stop -t 10 @P@
 Restart=always
 RestartSec=10
 TimeoutStartSec=0
@@ -907,19 +931,19 @@ TimeoutStartSec=0
 WantedBy=multi-user.target
 U1
 
-cat > /etc/systemd/system/vps-psiphon-watchdog.service <<'U2'
+put "/etc/systemd/system/$P-watchdog.service" <<'U2'
 [Unit]
-Description=vps-psiphon liveness and burned-exit watchdog
-After=vps-psiphon.service
+Description=@P@ liveness and burned-exit watchdog
+After=@P@.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/vps-psiphon-watchdog
+ExecStart=/usr/local/sbin/@P@-watchdog
 U2
 
-cat > /etc/systemd/system/vps-psiphon-watchdog.timer <<'U3'
+put "/etc/systemd/system/$P-watchdog.timer" <<'U3'
 [Unit]
-Description=Run the vps-psiphon watchdog every 5 minutes
+Description=Run the @P@ watchdog every 5 minutes
 
 [Timer]
 OnBootSec=5min
@@ -931,13 +955,13 @@ WantedBy=timers.target
 U3
 
 systemctl daemon-reload
-systemctl enable vps-psiphon.service >/dev/null 2>&1
+systemctl enable $P.service >/dev/null 2>&1
 # restart, not "enable --now": on a reinstall the service is already active and would
 # keep running with the previous parameters.
 # The restart brings a fresh tunnel: failures counted against the old one do not carry over.
-rm -f /var/lib/vps-psiphon-watchdog.state
-systemctl restart vps-psiphon.service
-[ "$WATCHDOG" = 1 ] && systemctl enable --now vps-psiphon-watchdog.timer
+rm -f /var/lib/$P-watchdog.state
+systemctl restart $P.service
+[ "$WATCHDOG" = 1 ] && systemctl enable --now $P-watchdog.timer
 
 # ------------------------------------------------------------------- verify --
 say "waiting for the tunnel"
@@ -945,39 +969,39 @@ say "waiting for the tunnel"
 # loops as "activating", and waiting on the log alone ends in a silent exit 0.
 TUNNEL_UP=0
 for i in $(seq 1 60); do
-  systemctl is-active --quiet vps-psiphon.service || break
+  systemctl is-active --quiet $P.service || break
   docker logs "$NAME" 2>&1 | grep -q '"noticeType":"Tunnels"' && { TUNNEL_UP=1; break; }
   sleep 2
 done
 
-if [ "$TUNNEL_UP" = 0 ] && ! systemctl is-active --quiet vps-psiphon.service; then
+if [ "$TUNNEL_UP" = 0 ] && ! systemctl is-active --quiet $P.service; then
   echo >&2
   printf '\033[1;31mERROR:\033[0m the tunnel never started.\n' >&2
-  journalctl -u vps-psiphon.service -n 40 --no-pager 2>/dev/null \
+  journalctl -u $P.service -n 40 --no-pager 2>/dev/null \
     | grep -iE 'error|failed|cannot|denied' | tail -5 | sed 's/^/    /' >&2
   # Stopped rather than left hammering docker every 10s while you read this.
-  systemctl stop vps-psiphon.service >/dev/null 2>&1 || true
+  systemctl stop $P.service >/dev/null 2>&1 || true
   echo >&2
   echo "    The service is stopped, not looping. Fix the cause and re-run this" >&2
-  echo "    installer, or 'vps-psiphon uninstall' to remove what was written." >&2
+  echo "    installer, or '$P uninstall' to remove what was written." >&2
   exit 1
 fi
 
 if [ "$TUNNEL_UP" = 0 ]; then
   say "no tunnel after 120s, but the service is alive — leaving it to keep trying"
-  say "watch it with:  vps-psiphon logs"
+  say "watch it with:  $P logs"
 fi
 sleep 3
 echo
-/usr/local/sbin/vps-psiphon status
+/usr/local/sbin/$P status
 echo
 say "xray outbound:"
 cat <<OUT
-    { "tag": "psiphon-out", "protocol": "socks",
+    { "tag": "$OUT_TAG", "protocol": "socks",
       "settings": { "address": "$BIND", "port": $SOCKS_PORT } }
 OUT
 if [ "${BIND_CHANGED:-0}" = 1 ]; then
   printf '\033[1;33m    !! this run MOVED the address (%s -> %s), so the outbound above is\n' "$OLD_BIND" "$BIND"
   printf '       NOT what your panel has. Update it now, or the tunnel carries nothing.\033[0m\n'
 fi
-say "manage with:  vps-psiphon {status|rotate|region <CC>|pool '<CC CC …>'|speed|logs|uninstall}"
+say "manage with:  $P {status|rotate|region <CC>|pool '<CC CC …>'|speed|logs|uninstall}"

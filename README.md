@@ -81,8 +81,9 @@ Requires root, docker and curl.
 |---|---|---|
 | `--region CC[,CC…]` | auto | exit country, ISO 3166-1 alpha-2. Several form a rotation pool |
 | `--device-region CC` | autodetected | region the client reports (cosmetic — the server decides by GeoIP) |
-| `--socks-port N` | 1080 | SOCKS5 port for xray |
-| `--http-port N` | 8080 | HTTP proxy port |
+| `--instance N` | 1 | which tunnel on this host, 1-99; N > 1 adds `-N` to every name — see Several tunnels on one host |
+| `--socks-port N` | 1080+N-1 | SOCKS5 port for xray |
+| `--http-port N` | 8080+N-1 | HTTP proxy port |
 | `--no-http` | — | do not publish the HTTP proxy at all; remembered across reinstalls |
 | `--http` | — | publish it after all — undoes a stored `--no-http` |
 | `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked first, in every mode. Empty disables it |
@@ -192,6 +193,51 @@ sites distrust shared circumvention exits — which makes them complements rathe
 alternatives. That reasoning is inference; the Reddit and Google results behind it are
 measured.
 
+### Several tunnels on one host
+
+One instance is one Psiphon tunnel: every connection routed to it shares one server
+and one exit address. When a single tunnel is no longer enough — or a bad pick should
+not reach all of your traffic at once — `--instance N` installs another, fully
+separate one:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Chara-Freedom/vps-psiphon/main/psiphon_install.sh) --instance 2 --region NL
+```
+
+Every name gets `-2`: the CLI is `vps-psiphon-2`, the units `vps-psiphon-2.service`
+and `vps-psiphon-2-watchdog.timer`, the parameters `/etc/default/vps-psiphon-2`. Its
+ports default to `1080+N-1` and `8080+N-1` — 1081 and 8081 for the second — and a
+taken HTTP port moves as usual. The first instance keeps its plain names, so an
+existing install is not touched. Two instances share nothing but the image: each has
+its own exit, pool, watchdog and journal, and `vps-psiphon-2 uninstall` removes only
+its own files. Numbers only, 1 to 99 — a word could collide with the first instance's
+own file names.
+
+Which traffic goes to which instance is your routing. Split it by where the traffic
+comes from, not per connection: then each user stays on one exit address, and each
+watchdog judges the only tunnel its traffic uses. Psiphon's own `TunnelPoolSize` does
+the opposite — it spreads one client's connections over several tunnels, so one user
+leaves from several addresses at once, and a country check reads one tunnel while the
+traffic uses another.
+
+For a node that receives traffic from other nodes, Xray's `vlessRoute` makes the split
+a config edit on each of them. VLESS lets a client set the 7th and 8th bytes of its
+UUID — the third group — to anything: the server still authenticates the same user and
+hands those two bytes to routing as a number. An upstream node whose outbound carries
+`…-0002-…` in that group lands on the second instance with:
+
+```json
+{
+  "vlessRoute": "2",
+  "domain": ["domain:google.com", "geosite:youtube"],
+  "outboundTag": "psiphon-out-2"
+}
+```
+
+Put such rules before the general one: the first match wins. An ordinary UUID has
+`4xxx` in that group — `vlessRoute` 16384-20479 — so it matches no small number and
+falls through to the general rule.
+
 ## Managing it
 
 ```
@@ -204,6 +250,8 @@ vps-psiphon logs [n]        Psiphon client log
 vps-psiphon watchdog [n]    watchdog journal
 vps-psiphon uninstall       remove everything, including this CLI
 ```
+
+A second instance answers to `vps-psiphon-2`, with the same commands.
 
 ## What gets installed
 
@@ -219,6 +267,9 @@ vps-psiphon uninstall       remove everything, including this CLI
 | `/opt/vps-psiphon/config` | Psiphon config (container volume) |
 | `/var/log/vps-psiphon-watchdog.log` | watchdog journal |
 | `/var/lib/vps-psiphon-watchdog.state` | watchdog counters |
+
+For instance N > 1, every name above carries `-N`: `/etc/default/vps-psiphon-2`,
+`vps-psiphon-2.service`, `/opt/vps-psiphon-2/config` and so on.
 
 ## The watchdog
 
@@ -675,3 +726,6 @@ vps-psiphon uninstall
 Removes the units, the container, the image, the config directory, the watchdog log
 and state — and finally unlinks itself, so nothing is left to clean up by hand. It
 then checks the disk and, if anything survived, names it and exits non-zero.
+
+Each instance removes only itself: `vps-psiphon-2 uninstall` leaves the first one
+running, and the image stays while any instance still uses it.
