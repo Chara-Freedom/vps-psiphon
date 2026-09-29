@@ -327,6 +327,25 @@ Six rotation triggers, in order of how certain they are:
    evening, three tunnels in a row gave a download 22–203 KB/s after its first byte,
    and those are rotated under either test.
 
+   The first day on the download test bears this out. Over about 25 hours on 28–29
+   September, on four nodes — five tunnels, one node running two — 1267 checks logged
+   both readings. They disagreed 169 times. In 164 of those the page was slow and the
+   download was not, and the next check of the same tunnel downloaded above the floor
+   149 times out of 159. In the other five the download alone failed: twice on the
+   edge, at 698 and 721 KB/s, and once behind a first byte of 2.8 s — all three above
+   the floor at the next check — and twice on tunnels already on their way out, which
+   that very pair rotated. Where both failed, 83 checks, the median first byte per node
+   was 1.5 to 7 seconds: genuine stalls, which either test rotates. Run over the same
+   tunnels, two failures in a row would have tripped on the page 61 times and on the
+   download 21, 16 of them on the same check. In 30 of the page's trips the download
+   read above the floor on both checks — rotations the old test would have made for
+   nothing. They fall on 8 tunnels, which went on serving for between about 20 minutes
+   and 11.6 hours. The 30 is an upper estimate, since a rotated tunnel does not trip
+   again, and the 8 a lower bound. Most of it came from one node where the page is slow
+   without any queue: a first byte in 0.16 s and `generate_204` in 0.13 s, yet the page
+   at about 600 KB/s against a download of about 1700, in 28% of its checks. Why the
+   page is slow there is not known.
+
    The floor is one number for every node, 800 KB/s. On the download it means that one
    connection sustains about 6.4 Mbit/s — roughly what 1080p needs. It was first
    fitted on the page: replaying three nodes' own logged history (~40 hours each,
