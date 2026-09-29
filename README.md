@@ -441,7 +441,7 @@ the subject of [A mismatch, not a country](#a-mismatch-not-a-country).
 **`GL` is YouTube's verdict.** Force `-4` and take it at face value for YouTube. A `GL`
 that agrees with the server's country says nothing reliable about Gemini, which runs a
 geo-check of its own — that is the next section; a `GL` that disagrees is a sign of
-trouble for all of Google's AI services.
+trouble for all of Google's AI services and for music on YouTube.
 
 ### Gemini keeps its own geo-check
 
@@ -503,11 +503,14 @@ Psiphon reports for the server it connected to:
 |---|---|---|
 | Google's verdict matches the server's country (FR, NL, DE) | 39 | 7 |
 | Genuine US — the server in the US, and Google says US | 8 | 0 |
-| Google's verdict differs from the server's — `US` or `RU` for a server in FR, NL or DE | 12 | **12** |
+| Google says `US` for a server in FR, NL or DE | 6 | **6** |
+| Google says `RU` for a server in FR, NL or DE | 6 | 6 |
 
 The seven in the first row are refused by Gemini itself (error 1060), and the Gemini
-check rotates them away. The last row is what nothing else saw: an address Google has
-reclassified keeps working for YouTube and breaks the AI services. A `US` verdict on a
+check rotates them away. A `RU` verdict is a mismatch in name only: Google calls the
+exit Russian, the refusal follows from that alone, and the denied-country check catches
+it first. The `US` row is the real finding — a supported country, and broken every
+time, while YouTube's pages keep loading and nothing else notices. A `US` verdict on a
 European server looked like a harmless rewrite and was once accepted by default for
 that reason — but genuine US exits work; what breaks is the disagreement. So the
 watchdog compares Google's verdict with the country Psiphon reports and rotates on a
@@ -516,6 +519,26 @@ mismatch, and there is no list of acceptable verdicts at all.
 By provider, DigitalOcean's servers in Germany fared worst that night — 9 of 11
 broken, mismatched or refused — and Akamai's best, 7 of 7 fine. Psiphon does not let
 you choose the provider, so that is information, not a setting.
+
+### What a mismatch does to YouTube
+
+One such exit was held and used through a signed-in browser: a European server placed
+in Germany by Psiphon, by independent geolocation and by Google's own cookie-consent
+page, while YouTube's `GL` read `US`. Gemini and AI Studio refused it, and watch pages
+asked for a captcha — that came with the address, since the first request for a watch
+page was sent to it whether signed in or not. A video blocked in Russia played. But
+YouTube Music answered *"YouTube Music is not available in your area"*, and a whole set
+of music videos showed a bare *"Video unavailable"* without naming any rights holder.
+
+One of those videos lists 118 countries in its own `availableCountries`, the US and
+Germany among them — and Russia too. So whatever country the licensing layer placed the
+address in, it was neither of the two it had every reason to be, and for that video the
+exit was worse than Russia. The video that played is allowed everywhere except Russia,
+so it shows only that the address was not placed in Russia. The same bare *"Video
+unavailable"* is familiar from Tor exits.
+
+The mismatch rotation therefore protects more than the AI services: it also keeps music
+playing.
 
 ### Optional settings
 
