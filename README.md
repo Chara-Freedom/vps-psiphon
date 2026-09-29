@@ -537,6 +537,14 @@ exit was worse than Russia. The video that played is allowed everywhere except R
 so it shows only that the address was not placed in Russia. The same bare *"Video
 unavailable"* is familiar from Tor exits.
 
+The two symptoms turn out to be one. The blocked video is an art track generated for a
+*"… - Topic"* channel, and its 118 countries are almost exactly the
+[120 where YouTube Music is available](https://support.google.com/youtubemusic/answer/6313540)
+— the lists differ only in a few dependent territories. So the licensing layer placed
+the address outside YouTube Music's market, which switches off YouTube Music and the
+music licensed for it at once, and no rights holder is named because none blocked
+anything.
+
 The mismatch rotation therefore protects more than the AI services: it also keeps music
 playing.
 
