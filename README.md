@@ -327,24 +327,34 @@ Six rotation triggers, in order of how certain they are:
    evening, three tunnels in a row gave a download 22–203 KB/s after its first byte,
    and those are rotated under either test.
 
-   The first day on the download test bears this out. Over about 25 hours on 28–29
-   September, on four nodes — five tunnels, one node running two — 1267 checks logged
-   both readings. They disagreed 169 times. In 164 of those the page was slow and the
-   download was not, and the next check of the same tunnel downloaded above the floor
-   149 times out of 159. In the other five the download alone failed: twice on the
-   edge, at 698 and 721 KB/s, and once behind a first byte of 2.8 s — all three above
-   the floor at the next check — and twice on tunnels already on their way out, which
-   that very pair rotated. Where both failed, 83 checks, the median first byte per node
-   was 1.5 to 7 seconds: genuine stalls, which either test rotates. Run over the same
-   tunnels, two failures in a row would have tripped on the page 61 times and on the
-   download 21, 16 of them on the same check. In 30 of the page's trips the download
-   read above the floor on both checks — rotations the old test would have made for
-   nothing. They fall on 8 tunnels, which went on serving for between about 20 minutes
-   and 11.6 hours. The 30 is an upper estimate, since a rotated tunnel does not trip
-   again, and the 8 a lower bound. Most of it came from one node where the page is slow
-   without any queue: a first byte in 0.16 s and `generate_204` in 0.13 s, yet the page
-   at about 600 KB/s against a download of about 1700, in 28% of its checks. Why the
-   page is slow there is not known.
+   Two days on the download test bear this out. Over about 50 hours on 28–30
+   September, on four nodes — five tunnels, one node running two — 2713 checks logged
+   both readings. The page alone was slow 223 times, the download alone 7. After a
+   slow page alone, the next check of the same tunnel downloaded above the floor 205
+   times out of 221, while the page itself recovered only 147 times. Of the seven slow
+   downloads, three sat on the edge, at 593 to 721 KB/s, and passed the next check;
+   three fell on tunnels already on their way out, and the last on the final check in
+   the logs. Where both failed, 115 checks, the median first byte per node was 1.8 to 7
+   seconds: genuine stalls, which either test rotates.
+
+   What matters is which rule would end a tunnel, and when. Run over all 81 tunnels,
+   two failures in a row would have ended 17 on the same check under either test. The
+   page would have ended 7 more one to three checks sooner — tunnels that were dying
+   anyway, so there the download reacts up to fifteen minutes later. The page would have
+   ended another 7 from 36 minutes to 10.3 hours sooner, while the download in between
+   held medians of 2.6 to 7.7 MB/s, and 11 that the download never ended, 6 of them
+   with the download above the floor on both checks; one of those went on serving for
+   11.6 hours. The download ended one tunnel the page would have kept, and it was dying,
+   with a first byte of 7 to 10 seconds. It never ended a tunnel before the page did.
+
+   The slow pages came in two kinds. Most had a queue behind them: a median first byte
+   of 0.6–0.8 s and `generate_204` in about a second. Two thirds of the rest came from a
+   single tunnel on one node — 63 slow pages in 147 checks with a first byte in 0.16 s
+   and `generate_204` in 0.12 s, the page at about 900 KB/s against a download of
+   about 2000. There was no queue at all, and why the page was slow there is not known.
+   The next tunnel on that node, 26 hours long, had 6 in 294. On a fast, quiet tunnel
+   the page tops out near 2500 KB/s while the download reads 18 000: the page measures
+   the round trip, not the channel.
 
    The floor is one number for every node, 800 KB/s. On the download it means that one
    connection sustains about 6.4 Mbit/s — roughly what 1080p needs. It was first
