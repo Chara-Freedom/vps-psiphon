@@ -215,10 +215,11 @@ own file names.
 
 Which traffic goes to which instance is your routing. Split it by where the traffic
 comes from, not per connection: then each user stays on one exit address, and each
-watchdog judges the only tunnel its traffic uses. Psiphon's own `TunnelPoolSize` does
-the opposite — it spreads one client's connections over several tunnels, so one user
-leaves from several addresses at once, and a country check reads one tunnel while the
-traffic uses another.
+watchdog judges the only tunnel its traffic uses. Psiphon's client has a
+`TunnelPoolSize` setting (default 1; vps-psiphon leaves it alone). Set higher, it would
+spread one client's connections over several tunnels: one user would leave from several
+addresses at once, and a country check could read one tunnel while the traffic uses
+another.
 
 For a node that receives traffic from other nodes, Xray's `vlessRoute` makes the split
 a config edit on each of them. VLESS lets a client set the 7th and 8th bytes of its
