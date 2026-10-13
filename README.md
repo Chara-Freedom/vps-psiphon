@@ -372,14 +372,15 @@ Six rotation triggers, in order of how certain they are:
    slow first reading the excuse changed nothing for 28, spared 22 that went on to
    serve, and kept 226 that were rotated anyway one check longer — ten minutes each,
    45 hours in all.
-6. **Gemini refuses** — asked directly: once for every new tunnel, at its first check
-   — a rotation, `rotate`, `region` and a reinstall all start one — and then every
-   `GEMINI_CHECK_SEC` (two hours by default), so a refused exit does not stand until
-   the old clock runs out. Gemini keeps a geo-check of its own that `GL` does not track, so an exit
-   can pass everything above and still be refused — see
-   [Gemini keeps its own geo-check](#gemini-keeps-its-own-geo-check). A refused
-   exit stays refused. An answer that is neither a reply nor a
-   refusal is logged as inconclusive and never rotates.
+6. **Gemini refuses** — asked directly, at every check, like everything above. Gemini
+   keeps a geo-check of its own that `GL` does not track, so an exit can pass
+   everything above and still be refused — see
+   [Gemini keeps its own geo-check](#gemini-keeps-its-own-geo-check). Its answer can
+   also change while a tunnel lasts: an exit it had served for ten hours was refused,
+   and an earlier version, which asked once per tunnel and then every two hours
+   (`GEMINI_CHECK_SEC`, dropped from the settings by a reinstall), would have kept it
+   up to two hours more. A refused exit stays refused. An answer that is neither a
+   reply nor a refusal is logged as inconclusive and never rotates.
 
 Only a slow tunnel waits for a second failure in a row. Every other trigger is decisive:
 one failure rotates at once, because those do not pass by themselves. Across four
@@ -429,9 +430,9 @@ settings. Journal: `/var/log/vps-psiphon-watchdog.log`.
 Checks run every five minutes, down from ten: a dead tunnel is now seen about two and
 a half minutes after it dies on average, and a slow one is rotated five minutes after
 its first failure instead of ten. Each run fetches YouTube's front page through the
-tunnel, about 800 KB — some 7 GB a month — plus the 4 MB download, about 35 GB a
-month, which is noise next to the users' own YouTube traffic leaving through the same
-exit; the captcha probe was a different matter, an identical search query every time.
+tunnel, about 800 KB — some 7 GB a month — Gemini's page and one message, about 1 MB
+— some 9 GB — and the 4 MB download, about 35 GB a month, which is noise next to the
+users' own Google traffic leaving through the same exit; the captcha probe was a different matter, an identical search query every time.
 
 There is no cooldown between rotations. The count starts at zero after each rotation,
 so a slow tunnel always gets two checks — about ten minutes — while a decisive
@@ -553,9 +554,8 @@ vps-psiphon-gemini-check            # through the tunnel
 vps-psiphon-gemini-check --direct   # from the host's own address
 ```
 
-Exit status 0 means served, 1 refused, 2 inconclusive. The watchdog asks once per new
-tunnel and then every `GEMINI_CHECK_SEC`, and rotates on a refusal; `vps-psiphon
-status` asks as well. What
+Exit status 0 means served, 1 refused, 2 inconclusive. The watchdog asks at every
+check and rotates on a refusal; `vps-psiphon status` asks as well. What
 tells an address problem apart from your account: an account-level restriction follows
 you from exit to exit, while this one disappears the moment the exit changes.
 
@@ -641,8 +641,6 @@ is run as a command.
 | `BULK_TEST_MB=4` | size of that download, MB; about 35 GB a month at 4. `0` judges the page instead, at no extra traffic |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first, in every mode; empty disables it |
-| `GEMINI_CHECK_SEC=7200` | seconds between asking Gemini whether it serves the exit; every new tunnel is also asked at its first check. One refusal rotates at once. `0` disables it |
-
 ## Measurements
 
 VPS in Finland (Hetzner, 12 CPU / 64 GB), August 2026, exit region DE.

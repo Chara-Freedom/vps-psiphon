@@ -312,7 +312,7 @@ chown -R 1000:1000 "$CONF_DIR"
 
 # Preserve operator-set values across a reinstall. The deny-list is tracked as
 # set-or-not, not by value: a deliberately emptied one must stay empty.
-OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""; OLD_GEMINI_CHECK=""; OLD_BULK_TEST=""
+OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""; OLD_BULK_TEST=""
 OLD_DENY_SET=0; OLD_DENY_REGIONS=""
 if [ -r "$ENVF" ] && grep -q '^DENY_REGIONS=' "$ENVF"; then
   OLD_DENY_SET=1
@@ -324,7 +324,6 @@ if [ "$DENY_REGIONS_SET" = 0 ]; then
 fi
 if [ -r "$ENVF" ]; then
   OLD_MIN_THROUGHPUT="$(sed -n 's/^MIN_THROUGHPUT_KBPS=//p' "$ENVF")"
-  OLD_GEMINI_CHECK="$(sed -n 's/^GEMINI_CHECK_SEC=//p' "$ENVF")"
   OLD_BULK_TEST="$(sed -n 's/^BULK_TEST_MB=//p' "$ENVF")"
   # 8 was the default until it halved to 4; only a value set by hand is kept.
   [ "$OLD_BULK_TEST" = 8 ] && OLD_BULK_TEST=""
@@ -402,11 +401,6 @@ MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-800}
 # about five seconds. About 35 GB a month at 4 MB every 5 minutes; 0 judges the YouTube
 # page instead, at no extra traffic — for a host whose traffic is metered or scarce.
 BULK_TEST_MB=$BULK_TEST_MB
-# Seconds between asking Gemini itself whether it serves the exit — one anonymous
-# message, about 1 MB; every new tunnel is also asked at its first check. Gemini keeps
-# a geo-check of its own that no country check sees. A refusal rotates at once; an
-# inconclusive answer never does. 0 disables it.
-GEMINI_CHECK_SEC=${OLD_GEMINI_CHECK:-7200}
 EOF
 chmod 600 "$ENVF"
 
@@ -637,9 +631,9 @@ put "/usr/local/sbin/$P-watchdog" <<'WD'
 #      from the first check, ~5 minutes into a tunnel; the ramp takes a minute or two.
 #      Measured on a download of BULK_TEST_MB after its first byte, so a queue in a
 #      busy tunnel is logged but not read as slowness; at 0, on the YouTube page.
-#   6. Gemini refuses    — asked at the first check of every new tunnel, then every
-#      GEMINI_CHECK_SEC; Gemini keeps a geo-check of its own. Error 1060 rotates at
-#      once, without waiting for a second failure.
+#   6. Gemini refuses    — asked at every check, like everything above; Gemini keeps a
+#      geo-check of its own, and its answer about an exit can change while the tunnel
+#      lasts. Error 1060 rotates at once, without waiting for a second failure.
 set -uo pipefail
 . /etc/default/@P@
 LOG=/var/log/@P@-watchdog.log
@@ -648,9 +642,8 @@ S=(--socks5-hostname "${BIND:-127.0.0.1}:${SOCKS_PORT}")
 touch "$LOG" 2>/dev/null
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
-fails=0; last_gemini=0; gemini_tunnel=""
+fails=0
 [ -r "$STATE" ] && . "$STATE"
-now=$(date +%s)
 
 # The tunnel this check is about. A restart during the check — the installer, `rotate`,
 # `region` — leaves readings that belong to neither tunnel, and a decisive failure among
@@ -721,11 +714,6 @@ else
   fi
 fi
 
-if [ "$started" != "$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-@P@}" 2>/dev/null)" ]; then
-  log "check not judged: the tunnel restarted during it${reason:+ (it read: $reason)}"
-  exit 0
-fi
-
 # Only a slow reading can be a passing dip, so only it waits for a second one in a row.
 # A dead or stalled tunnel and a country failure rotate at once: in four nodes' logs the next
 # check found Google's verdict unchanged 173 times out of 173 and a dead or stalled
@@ -736,20 +724,20 @@ case "$reason" in
   socks-dead*|stalled-tunnel*|denied-country*|country-mismatch*) decisive=1 ;;
 esac
 
-# Gemini is asked once per tunnel as soon as it is up — a rotation, `rotate`, `region`
-# or a reinstall all start a new container, and an exit Gemini refuses should not
-# stand until the old clock runs out — and then on its own clock, since the answer
-# changes over days. An inconclusive answer still counts as asked.
-if [ "$alive" = 1 ] && [ "${GEMINI_CHECK_SEC:-7200}" -gt 0 ] \
-   && { { [ -n "$started" ] && [ "$started" != "$gemini_tunnel" ]; } \
-        || [ $((now - last_gemini)) -ge "${GEMINI_CHECK_SEC:-7200}" ]; }; then
+# Gemini is asked at every check: its answer about an exit can change while the tunnel
+# lasts. A tunnel already failing decisively is rotated anyway, so it is not asked.
+if [ "$alive" = 1 ] && [ "$decisive" = 0 ]; then
   gem="$(/usr/local/sbin/@P@-gemini-check)"; grc=$?
-  last_gemini=$now; gemini_tunnel="$started"
   log "gemini: $gem"
   if [ "$grc" = 1 ]; then
     decisive=1
-    [ -z "$reason" ] && reason="gemini-refused (error 1060 — one refusal is decisive)"
+    reason="gemini-refused (error 1060 — one refusal is decisive)${reason:+; also $reason}"
   fi
+fi
+
+if [ "$started" != "$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-@P@}" 2>/dev/null)" ]; then
+  log "check not judged: the tunnel restarted during it${reason:+ (it read: $reason)}"
+  exit 0
 fi
 
 if [ -z "$reason" ]; then
@@ -773,8 +761,7 @@ if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] || [ "$decisive" = 1 ]; then
   fails=0
 fi
 
-printf "fails=%s\nlast_gemini=%s\ngemini_tunnel='%s'\n" \
-       "$fails" "$last_gemini" "$gemini_tunnel" > "$STATE"
+printf "fails=%s\n" "$fails" > "$STATE"
 WD
 chmod 755 "/usr/local/sbin/$P-watchdog"
 touch "/var/log/$P-watchdog.log"
