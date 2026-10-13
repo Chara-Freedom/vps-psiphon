@@ -430,9 +430,10 @@ settings. Journal: `/var/log/vps-psiphon-watchdog.log`.
 Checks run every five minutes, down from ten: a dead tunnel is now seen about two and
 a half minutes after it dies on average, and a slow one is rotated five minutes after
 its first failure instead of ten. Each run fetches YouTube's front page through the
-tunnel, about 800 KB — some 7 GB a month — Gemini's page and one message, about 1 MB
-— some 9 GB — and the 4 MB download, about 35 GB a month, which is noise next to the
-users' own Google traffic leaving through the same exit; the captcha probe was a different matter, an identical search query every time.
+tunnel, about 800 KB — some 7 GB a month — Gemini's page and one message, about 850 KB
+— some 7 GB — and the 4 MB download, about 35 GB a month, which is noise next to the
+users' own Google traffic leaving through the same exit; the captcha probe was a
+different matter, an identical search query every time.
 
 There is no cooldown between rotations. The count starts at zero after each rotation,
 so a slow tunnel always gets two checks — about ten minutes — while a decisive
