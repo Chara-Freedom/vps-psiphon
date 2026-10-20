@@ -39,6 +39,7 @@ PUBLISH_HTTP=1
 DENY_REGIONS_DEFAULT="RU BY IR SY CU KP CN VE"
 DENY_REGIONS=""; DENY_REGIONS_SET=0
 BULK_TEST_MB=""; BULK_TEST_SET=0
+TUNNEL_POOL=""; TUNNEL_POOL_SET=0
 
 # Ports asked for explicitly are honoured or refused, never silently moved.
 SOCKS_PORT_SET=0
@@ -76,7 +77,11 @@ psiphon_install.sh [options]
                        of the YouTube page instead, at no extra traffic — for a
                        host with metered or scarce traffic. Remembered across
                        reinstalls.
-  --bind ADDR          host address to publish the SOCKS5 on. Default: the
+  --tunnel-pool N      tunnels this instance keeps open at once, 1-32, default 1
+                       (Psiphon's TunnelPoolSize). New connections spread over
+                       them, so one user may leave from several addresses at once.
+                       Remembered across reinstalls.
+  --bind ADDR         host address to publish the SOCKS5 on. Default: the
                        docker0 gateway (usually 172.17.0.1), where the kernel
                        DNATs the traffic. On loopback it cannot, and docker-proxy
                        copies every byte in userspace instead — 0.10 of a core
@@ -109,6 +114,9 @@ while [ $# -gt 0 ]; do
     --bulk-test-mb)
       case "${2:-}" in ''|*[!0-9]*) echo "--bulk-test-mb takes a whole number of MB" >&2; exit 1 ;; esac
       BULK_TEST_MB="$2"; BULK_TEST_SET=1; shift 2 ;;
+    --tunnel-pool)
+      case "${2:-}" in [1-9]|[12][0-9]|3[0-2]) ;; *) echo "--tunnel-pool takes a number from 1 to 32" >&2; exit 1 ;; esac
+      TUNNEL_POOL="$2"; TUNNEL_POOL_SET=1; shift 2 ;;
     --bind)          BIND="${2:?}";          shift 2 ;;
     --bind-loopback) BIND=127.0.0.1;         shift   ;;
     --image)         IMAGE="${2:?}";         shift 2 ;;
@@ -312,7 +320,7 @@ chown -R 1000:1000 "$CONF_DIR"
 
 # Preserve operator-set values across a reinstall. The deny-list is tracked as
 # set-or-not, not by value: a deliberately emptied one must stay empty.
-OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""; OLD_BULK_TEST=""
+OLD_MIN_THROUGHPUT=""; OLD_REGION_POOL=""; OLD_BULK_TEST=""; OLD_TUNNEL_POOL=""
 OLD_DENY_SET=0; OLD_DENY_REGIONS=""
 if [ -r "$ENVF" ] && grep -q '^DENY_REGIONS=' "$ENVF"; then
   OLD_DENY_SET=1
@@ -327,10 +335,12 @@ if [ -r "$ENVF" ]; then
   OLD_BULK_TEST="$(sed -n 's/^BULK_TEST_MB=//p' "$ENVF")"
   # 8 was the default until it halved to 4; only a value set by hand is kept.
   [ "$OLD_BULK_TEST" = 8 ] && OLD_BULK_TEST=""
+  OLD_TUNNEL_POOL="$(sed -n 's/^TUNNEL_POOL_SIZE=//p' "$ENVF")"
   OLD_REGION_POOL="$(sed -n 's/^REGION_POOL=//p' "$ENVF" | tr -d "'")"
   [ "$REGION_POOL_SET" = 1 ] || REGION_POOL="$OLD_REGION_POOL"
 fi
 [ "$BULK_TEST_SET" = 1 ] || BULK_TEST_MB="${OLD_BULK_TEST:-4}"
+[ "$TUNNEL_POOL_SET" = 1 ] || TUNNEL_POOL="${OLD_TUNNEL_POOL:-1}"
 
 # A country both requested and denied rotates forever.
 for r in ${EGRESS_REGION:-} ${REGION_POOL:-}; do
@@ -401,6 +411,12 @@ MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-800}
 # about five seconds. About 35 GB a month at 4 MB every 5 minutes; 0 judges the YouTube
 # page instead, at no extra traffic — for a host whose traffic is metered or scarce.
 BULK_TEST_MB=$BULK_TEST_MB
+# Tunnels the client keeps open at once (Psiphon's TunnelPoolSize), 1-32. New connections
+# spread over them: a busy node no longer queues behind one server, and a tunnel that dies
+# takes only its share. The price: one user leaves from several addresses at once, and
+# each check of the watchdog sees whichever tunnel takes its connections. 1 = Psiphon's
+# own default, one tunnel.
+TUNNEL_POOL_SIZE=$TUNNEL_POOL
 EOF
 chmod 600 "$ENVF"
 
@@ -443,12 +459,19 @@ if [ ! -f "$cfg" ] &&
   mv "$cfg.new" "$cfg"
 fi
 rm -f "$cfg.new"
-if [ -f "$cfg" ]; then
-  if grep -q '"SSHChannelWindowSize"' "$cfg"; then
-    sed -i -E "s/\"SSHChannelWindowSize\"[[:space:]]*:[[:space:]]*[0-9]+/\"SSHChannelWindowSize\": ${WINDOW}/" "$cfg"
+# A numeric top-level key: replaced where present, inserted after the opening brace if not.
+setkey() {
+  if grep -q "\"$1\"" "$cfg"; then
+    sed -i -E "s/\"$1\"[[:space:]]*:[[:space:]]*[0-9]+/\"$1\": $2/" "$cfg"
   else
-    sed -i "0,/{/s/{/{\n \"SSHChannelWindowSize\": ${WINDOW},/" "$cfg"
+    sed -i "0,/{/s/{/{\n \"$1\": $2,/" "$cfg"
   fi
+}
+if [ -f "$cfg" ]; then
+  setkey SSHChannelWindowSize "$WINDOW"
+  # How many tunnels the client keeps at once; written every start, so a changed
+  # TUNNEL_POOL_SIZE applies from the next restart without clearing the server list.
+  setkey TunnelPoolSize "${TUNNEL_POOL_SIZE:-1}"
 fi
 
 # The BIND prefix is load-bearing: psiphon listens on 0.0.0.0 inside the container,
@@ -634,6 +657,9 @@ put "/usr/local/sbin/$P-watchdog" <<'WD'
 #   6. Gemini refuses    — asked at every check, like everything above; Gemini keeps a
 #      geo-check of its own, and its answer about an exit can change while the tunnel
 #      lasts. Error 1060 rotates at once, without waiting for a second failure.
+# With a pool (TUNNEL_POOL_SIZE > 1) every probe rides whichever tunnel takes its
+# connection: a bad tunnel is caught when a probe lands on it, SOCKS is dead only when
+# every tunnel is, and a rotation restarts the whole pool.
 set -uo pipefail
 . /etc/default/@P@
 LOG=/var/log/@P@-watchdog.log
@@ -659,7 +685,7 @@ for attempt in 1 2; do
   [ "$attempt" = 1 ] && sleep 15
 done
 
-reason=""; gl=""; sr=""; kbps=""; bulk=""
+reason=""; gl=""; sr=""; kbps=""; bulk=""; tn=""; pooltag=""
 if [ "$alive" = 0 ]; then
   reason="socks-dead"
 else
@@ -674,6 +700,12 @@ else
   kbps=$(( ${spd%%.*} / 1024 ))
   # The server's own country, as Psiphon announced it for the current tunnel.
   sr="$(docker logs "${NAME:-@P@}" 2>&1 | grep -oE '"serverRegion":"[A-Z]{2}"' | tail -1 | cut -d'"' -f4)"
+  # With a pool, how many of its tunnels are up: the client announces the count.
+  if [ "${TUNNEL_POOL_SIZE:-1}" -gt 1 ]; then
+    tn="$(docker logs "${NAME:-@P@}" 2>&1 | grep -oE '"count":[0-9]+\},"noticeType":"Tunnels"' \
+          | tail -1 | grep -oE '[0-9]+' | head -1)"
+    pooltag=", tunnels ${tn:-?}/${TUNNEL_POOL_SIZE}"
+  fi
   if [ -n "$gl" ]; then
     case " ${DENY_REGIONS:-} " in
       *" $gl "*) reason="denied-country (Google sees $gl — sanctioned or Google-blocked)" ;;
@@ -747,7 +779,7 @@ else
   fails=$(( fails + 1 ))
 fi
 [ -n "$reason" ] && log "check failed ($reason), $fails in a row"
-[ -n "$kbps" ] && log "throughput ${kbps} KB/s (country ${gl:-?}, server ${sr:-?})${bulk:+; $bulk}${t204:+; generate_204 in ${t204}s}"
+[ -n "$kbps" ] && log "throughput ${kbps} KB/s (country ${gl:-?}, server ${sr:-?}${pooltag})${bulk:+; $bulk}${t204:+; generate_204 in ${t204}s}"
 
 if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] || [ "$decisive" = 1 ]; then
   old="$(curl -s --max-time 15 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
@@ -793,10 +825,12 @@ status() {
   else
     echo "http      : not published"
   fi
-  local sr gl
+  local sr gl tn
   sr="$(docker logs "$NAME" 2>&1 | grep -oE '"serverRegion":"[A-Z]{2}"' | tail -1 | cut -d'"' -f4)"
   echo "server    : ${sr:-?}   (the country Psiphon reports for this exit)"
-  echo -n "tunnels   : "; docker logs "$NAME" 2>&1 | grep -c '"noticeType":"Tunnels"' || true
+  tn="$(docker logs "$NAME" 2>&1 | grep -oE '"count":[0-9]+\},"noticeType":"Tunnels"' \
+        | tail -1 | grep -oE '[0-9]+' | head -1)"
+  echo "tunnels   : ${tn:-0} up, pool of ${TUNNEL_POOL_SIZE:-1}   (the client's last count)"
   echo -n "limits    : "; docker logs "$NAME" 2>&1 | grep -o '"downstreamBytesPerSecond":[0-9]*' | tail -1 || echo 'n/a'
   echo -n "exit IP   : "; curl -s --max-time 20 "${S[@]}" https://api.ipify.org 2>/dev/null || echo 'UNREACHABLE'; echo
   gl="$(curl -s --max-time 25 "${S[@]}" -H 'Accept-Language: en-US' https://www.youtube.com/ 2>/dev/null \

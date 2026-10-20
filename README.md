@@ -88,6 +88,7 @@ Requires root, docker and curl.
 | `--http` | — | publish it after all — undoes a stored `--no-http` |
 | `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked first, in every mode. Empty disables it |
 | `--bulk-test-mb N` | 4 | size of the watchdog's throughput download, MB — about 35 GB a month at 4. `0` judges the YouTube page instead, at no extra traffic, for a host whose traffic is metered or scarce. Remembered across reinstalls |
+| `--tunnel-pool N` | 1 | tunnels this instance keeps at once, 1-32 (Psiphon's `TunnelPoolSize`) — see A pool of tunnels in one instance. Remembered across reinstalls |
 | `--bind ADDR` | docker0 gateway | host address the ports are published on |
 | `--bind-loopback` | — | publish on `127.0.0.1` instead of the gateway |
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
@@ -215,11 +216,10 @@ own file names.
 
 Which traffic goes to which instance is your routing. Split it by where the traffic
 comes from, not per connection: then each user stays on one exit address, and each
-watchdog judges the only tunnel its traffic uses. Psiphon's client has a
-`TunnelPoolSize` setting (default 1; vps-psiphon leaves it alone). Set higher, it would
-spread one client's connections over several tunnels: one user would leave from several
-addresses at once, and a country check could read one tunnel while the traffic uses
-another.
+watchdog judges the only tunnel its traffic uses. A pool of tunnels inside one
+instance (`--tunnel-pool`, next section) splits per connection instead: one user leaves
+from several addresses at once, and the watchdog's probes see whichever tunnel takes
+them.
 
 For a node that receives traffic from other nodes, Xray's `vlessRoute` makes the split
 a config edit on each of them. VLESS lets a client set the 7th and 8th bytes of its
@@ -238,6 +238,35 @@ hands those two bytes to routing as a number. An upstream node whose outbound ca
 Put such rules before the general one: the first match wins. An ordinary UUID has
 `4xxx` in that group — `vlessRoute` 16384-20479 — so it matches no small number and
 falls through to the general rule.
+
+### A pool of tunnels in one instance
+
+`--tunnel-pool N` (1-32, default 1) sets Psiphon's own `TunnelPoolSize`: the instance
+keeps up to N tunnels open at once, each to a server of its own, and spreads new
+connections over them. A single connection is no faster — each one runs inside one
+tunnel — but a busy node gains twice:
+
+- the load no longer queues behind one server: on one busy node, eight parallel
+  downloads carried 167 Mbit/s over a pool of 4 (three tunnels up) against 92 over a
+  single tunnel;
+- a tunnel that dies takes only its share of the connections with it; the rest carry
+  on, and SOCKS reads dead only when every tunnel is.
+
+The price:
+
+- **One user leaves from several addresses at once.** Google judges a session by its
+  address, and a session whose requests arrive from different addresses can get a
+  captcha with no checkbox to pass. Separate instances, split by where the traffic
+  comes from (previous section), never do this; a pool always does.
+- **The watchdog sees one tunnel per check** — whichever takes the probe's connection.
+  A bad tunnel (a denied country, a mismatch) is caught when a probe lands on it, and a
+  rotation restarts the whole pool, good tunnels included.
+
+For Gemini alone a pool buys nothing: leave it at 1. Every tunnel is picked in the
+requested country, so the server's country stays one value for the whole pool. With a
+pool, the watchdog adds the count to each reading — `tunnels 3/4` — and `status` shows
+it. The setting is remembered across reinstalls and applies from the next restart;
+`--tunnel-pool 1` returns to one tunnel.
 
 ## Managing it
 
@@ -640,6 +669,7 @@ is run as a command.
 |---|---|
 | `MIN_THROUGHPUT_KBPS=800` | throughput floor in KB/s: the rate of the watchdog's download after its first byte, or of the YouTube page at `BULK_TEST_MB=0`. One value for every node; change it only for a node that genuinely cannot reach it. `0` disables the check |
 | `BULK_TEST_MB=4` | size of that download, MB; about 35 GB a month at 4. `0` judges the page instead, at no extra traffic |
+| `TUNNEL_POOL_SIZE=1` | tunnels kept open at once, 1-32; applies from the next restart (`systemctl restart vps-psiphon`) |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first, in every mode; empty disables it |
 ## Measurements
