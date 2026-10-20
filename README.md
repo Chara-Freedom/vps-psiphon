@@ -11,7 +11,7 @@ and reconnects to a different one when it stops being usable.
 
 The xray outbound is five lines. The node does everything else.
 
-Companion project: **[vps-warp](https://github.com/tagashi666/vps-warp)** — the
+Companion project: **[vps-warp](https://github.com/Chara-Freedom/vps-warp)** — the
 same idea over Cloudflare WARP. The two coexist without conflict: WARP works at
 kernel level through `fwmark`, vps-psiphon through a local SOCKS, so xray can
 hold both outbounds at once and split traffic by rules.
@@ -59,7 +59,7 @@ hold both outbounds at once and split traffic by rules.
 
 - [Psiphon-Labs/psiphon-tunnel-core](https://github.com/Psiphon-Labs/psiphon-tunnel-core) — the client itself
 - [swarupsengupta2007/psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker) — the image, built from source in CI
-- [vps-warp](https://github.com/tagashi666/vps-warp) — the same thing for Cloudflare WARP
+- [vps-warp](https://github.com/Chara-Freedom/vps-warp) — the same thing for Cloudflare WARP
 
 ## Install
 

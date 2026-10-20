@@ -11,7 +11,7 @@ Psiphon как выходная точка для ноды xray/remnawave.
 
 Аутбаунд в xray — пять строчек. Всё остальное делает нода.
 
-Парный проект: **[vps-warp](https://github.com/tagashi666/vps-warp)** — то же самое,
+Парный проект: **[vps-warp](https://github.com/Chara-Freedom/vps-warp)** — то же самое,
 но через Cloudflare WARP. Ставятся рядом и не конфликтуют: WARP работает на уровне
 ядра через `fwmark`, vps-psiphon — через локальный SOCKS, так что в xray можно
 держать оба аутбаунда сразу и разводить трафик правилами.
@@ -60,7 +60,7 @@ Psiphon как выходная точка для ноды xray/remnawave.
 
 - [Psiphon-Labs/psiphon-tunnel-core](https://github.com/Psiphon-Labs/psiphon-tunnel-core) — сам клиент
 - [swarupsengupta2007/psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker) — образ, собирается из исходников в CI
-- [vps-warp](https://github.com/tagashi666/vps-warp) — то же самое, но для Cloudflare WARP
+- [vps-warp](https://github.com/Chara-Freedom/vps-warp) — то же самое, но для Cloudflare WARP
 
 ## Установка
 
