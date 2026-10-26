@@ -668,13 +668,17 @@ S=(--socks5-hostname "${BIND:-127.0.0.1}:${SOCKS_PORT}")
 touch "$LOG" 2>/dev/null
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
-fails=0
+fails=0; tunnel=""
 [ -r "$STATE" ] && . "$STATE"
 
 # The tunnel this check is about. A restart during the check — the installer, `rotate`,
 # `region` — leaves readings that belong to neither tunnel, and a decisive failure among
 # them would rotate the fresh one for nothing, so such a check is not judged.
 started="$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-@P@}" 2>/dev/null)"
+# Failures belong to the tunnel they were counted on. After a restart from outside the
+# watchdog — `rotate`, `region`, systemctl — the fresh tunnel starts from zero instead of
+# inheriting a slow reading that was never its own.
+[ "$tunnel" = "$started" ] || fails=0
 
 alive=0; t204=""
 # Retry once, so a check racing a (re)start does not log a failure that never was.
@@ -793,7 +797,7 @@ if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] || [ "$decisive" = 1 ]; then
   fails=0
 fi
 
-printf "fails=%s\n" "$fails" > "$STATE"
+printf "fails=%s\ntunnel=%s\n" "$fails" "$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-@P@}" 2>/dev/null)" > "$STATE"
 WD
 chmod 755 "/usr/local/sbin/$P-watchdog"
 touch "/var/log/$P-watchdog.log"
