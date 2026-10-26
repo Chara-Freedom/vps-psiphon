@@ -457,10 +457,13 @@ window used to be five checks, then three; a reinstall drops `FAIL_WINDOW` from 
 settings. Journal: `/var/log/vps-psiphon-watchdog.log`.
 
 The count belongs to the tunnel it was taken on: the state file keeps the container's
-start time next to it, and a tunnel started by anything else — `vps-psiphon rotate`,
-`region`, a manual restart — begins from zero. Before that, a fresh tunnel inherited
-the old one's slow reading, and one slow check of its own rotated it away as "2 in a
-row" — that is how a good exit was lost on a live node.
+start time next to it, and a tunnel started by anything — the watchdog's own rotation,
+a reinstall, `vps-psiphon rotate`, `region`, a manual restart — begins from zero. One
+rule replaces the two special cases there used to be, a reset after the watchdog's
+rotation and the installer deleting the state file. Those two missed the manual
+restarts: a fresh tunnel inherited the old one's slow reading, and one slow check of
+its own rotated it away as "2 in a row" — that is how a good exit was lost on a live
+node.
 
 Checks run every five minutes, down from ten: a dead tunnel is now seen about two and
 a half minutes after it dies on average, and a slow one is rotated five minutes after

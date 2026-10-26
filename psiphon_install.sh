@@ -675,9 +675,9 @@ fails=0; tunnel=""
 # `region` — leaves readings that belong to neither tunnel, and a decisive failure among
 # them would rotate the fresh one for nothing, so such a check is not judged.
 started="$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-@P@}" 2>/dev/null)"
-# Failures belong to the tunnel they were counted on. After a restart from outside the
-# watchdog — `rotate`, `region`, systemctl — the fresh tunnel starts from zero instead of
-# inheriting a slow reading that was never its own.
+# Failures belong to the tunnel they were counted on. Whatever restarted it — this
+# watchdog's own rotation, the installer, `rotate`, `region`, systemctl — the fresh tunnel
+# starts from zero instead of inheriting a slow reading that was never its own.
 [ "$tunnel" = "$started" ] || fails=0
 
 alive=0; t204=""
@@ -794,10 +794,11 @@ if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] || [ "$decisive" = 1 ]; then
   sleep 45
   new="$(curl -s --max-time 20 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
   log "rotated: $old -> $new"
-  fails=0
 fi
 
-printf "fails=%s\ntunnel=%s\n" "$fails" "$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-@P@}" 2>/dev/null)" > "$STATE"
+# Recorded against the tunnel this check judged: after a rotation it is the old one, so
+# the next check finds a different tunnel and starts from zero.
+printf "fails=%s\ntunnel=%s\n" "$fails" "$started" > "$STATE"
 WD
 chmod 755 "/usr/local/sbin/$P-watchdog"
 touch "/var/log/$P-watchdog.log"
@@ -982,9 +983,8 @@ U3
 systemctl daemon-reload
 systemctl enable $P.service >/dev/null 2>&1
 # restart, not "enable --now": on a reinstall the service is already active and would
-# keep running with the previous parameters.
-# The restart brings a fresh tunnel: failures counted against the old one do not carry over.
-rm -f /var/lib/$P-watchdog.state
+# keep running with the previous parameters. The restart brings a fresh tunnel, and the
+# watchdog does not carry the old one's failures over to it.
 systemctl restart $P.service
 [ "$WATCHDOG" = 1 ] && systemctl enable --now $P-watchdog.timer
 
