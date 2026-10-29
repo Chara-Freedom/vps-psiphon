@@ -825,12 +825,16 @@ a CDN, pairs the client with a volunteer's proxy — Psiphon Conduit, running on
 phone or home computer — and the tunnel runs over WebRTC, on UDP, to that device and
 from there to the server. That is what lets a user behind a censor reach Psiphon at
 all, and for such a user it is a sound design. An exit is the opposite case: its network
-is open, and its one tunnel carries a whole host's traffic, which a volunteer's uplink
-cannot.
+is open, and its one tunnel carries a whole host's traffic, which a volunteer's link
+rarely can.
 
-Under that load in-proxy tunnels either died within about five minutes — the client
-still reporting a connected tunnel while SOCKS answered nothing — or crawled at 100–400
-KB/s. Direct tunnels (`SSH`, `OSSH`, `QUIC-OSSH`, `TLS-OSSH`) carried megabytes a
+Under that load in-proxy tunnels almost always either died within about five minutes —
+the client still reporting a connected tunnel while SOCKS answered nothing — or crawled
+at 100–400 KB/s. Of some sixty whose protocol is known, one lasted for hours, and one
+held 9–11 MB/s for its first twelve minutes and was down to 1.2 MB/s at the next check:
+a lottery decided by the volunteer's link, with few winning tickets. Without that load
+in-proxy works — on an idle test box one in-proxy tunnel held a median of 7.9 MB/s for
+two days and never fell below the floor. Direct tunnels (`SSH`, `OSSH`, `QUIC-OSSH`, `TLS-OSSH`) carried megabytes a
 second for hours. A rotation is a restart, and a restart is a new establishment, so
 each rotation drew in-proxy again: a storm went on until a direct tunnel came up by
 chance. On one exit host, over the one day for which every tunnel's protocol is known,
