@@ -25,6 +25,7 @@
 # `vps-psiphon uninstall` removes all of those, the container, the image and itself.
 set -euo pipefail
 
+VERSION=1.0
 IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
 INSTANCE=1
 # Chosen after preflight: the default address exists only once docker is running.
@@ -48,8 +49,8 @@ HTTP_PORT_SET=0
 PUBLISH_HTTP_SET=0
 
 usage() {
-  cat <<'U'
-psiphon_install.sh [options]
+  cat <<U
+psiphon_install.sh $VERSION [options]
   --region CC[,CC…]    egress country (ISO 3166-1 alpha-2). Empty = auto, the
                        fastest server in any country. Several, comma-separated,
                        form a POOL: every rotation advances to the next country,
@@ -306,7 +307,7 @@ if [ -z "$DEVICE_REGION" ]; then
 fi
 
 if [ "$PUBLISH_HTTP" = 1 ]; then HTTP_DESC="$BIND:$HTTP_PORT"; else HTTP_DESC="not published"; fi
-say "image=$IMAGE  egress=${EGRESS_REGION:-auto}  device=$DEVICE_REGION  socks=$BIND:$SOCKS_PORT  http=$HTTP_DESC"
+say "vps-psiphon $VERSION  image=$IMAGE  egress=${EGRESS_REGION:-auto}  device=$DEVICE_REGION  socks=$BIND:$SOCKS_PORT  http=$HTTP_DESC"
 
 # ------------------------------------------------------------------ install --
 mkdir -p "$CONF_DIR"
@@ -369,7 +370,7 @@ fi
 # Unquoted heredoc, for the values — so nothing below may contain a backtick or a
 # dollar sign that is not meant to expand.
 cat > "$ENVF" <<EOF
-# $P — written by psiphon_install.sh
+# $P — written by psiphon_install.sh $VERSION
 #
 # NOTE: this file is sourced by the shell, so any value containing spaces MUST be
 # quoted. Unquoted, everything after the first space is run as a command.
@@ -491,10 +492,11 @@ if [ -f "$cfg" ]; then
   # off. The protocol limit then stands: what Psiphon itself offered, minus in-proxy.
   setline DisableTactics true
   setline LimitTunnelProtocols '["SSH", "OSSH", "QUIC-OSSH", "TLS-OSSH", "SHADOWSOCKS-OSSH", "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH", "UNFRONTED-MEEK-SESSION-TICKET-OSSH", "FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH"]'
-  # The protocol of each tunnel that comes up is announced only in a diagnostic notice;
-  # the watchdog copies it to its log. Diagnostic notices hold session details, so the
-  # service's journal is not for posting anywhere public.
-  setline EmitDiagnosticNotices true
+  # Diagnostic notices stay off. They are the only notices that name a tunnel's protocol,
+  # but on a busy exit they ran to some 25 MB a day, nearly all of it one line per failed
+  # user connection, which the client cannot silence alone. The watchdog reads the
+  # protocol from the client's own store instead.
+  setline EmitDiagnosticNotices false
 fi
 
 # The BIND prefix is load-bearing: psiphon listens on 0.0.0.0 inside the container,
@@ -693,23 +695,32 @@ log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
 # Every tunnel the client brings up, with its protocol: after a rotation, after the
 # client's own reconnect inside a running container, after any restart. The client
-# announces each one in a diagnostic notice, ActiveTunnel; the service's journal keeps
-# them across container restarts. Each is logged once, with the client's own timestamp.
+# stores the parameters of each tunnel that connected, one record per server, with the
+# time it connected and its protocol; the record outlives the container. Each tunnel is
+# logged once. The first run after an install starts from the container's own start.
 SEEN=/var/lib/@P@-watchdog.seen
+DB="${CONF_DIR:-/opt/@P@/config}/ca.psiphon.PsiphonTunnel.tunnel-core/datastore/psiphon.boltdb"
 log_tunnels() {
-  local last="" since="-15min" line ts proto
+  local last="" max ts proto ns
   [ -r "$SEEN" ] && last="$(cat "$SEEN" 2>/dev/null)"
-  [ -n "$last" ] && since="$(date -d "$last" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo -15min)"
-  while read -r line; do
-    ts="$(grep -oE '"timestamp":"[^"]+"' <<<"$line" | cut -d'"' -f4)"
-    proto="$(grep -oE '"protocol":"[^"]+"' <<<"$line" | cut -d'"' -f4)"
-    [ -n "$ts" ] || continue
-    [[ -n "$last" && ! "$ts" > "$last" ]] && continue
-    log "tunnel up: ${proto:-?} (announced at $ts)"
-    last="$ts"
-  done < <(journalctl -u @P@.service -o cat --no-pager --since "$since" 2>/dev/null \
-             | grep '"noticeType":"ActiveTunnel"')
-  [ -n "$last" ] && printf '%s\n' "$last" > "$SEEN"
+  if ! [[ "$last" =~ ^[0-9]+$ ]]; then
+    last="$(date -d "$(docker inspect -f '{{.State.StartedAt}}' "${NAME:-@P@}" 2>/dev/null)" +%s%N 2>/dev/null)"
+    [[ "$last" =~ ^[0-9]+$ ]] || return 0
+    last=$(( last - 60000000000 ))
+  fi
+  [ -r "$DB" ] || return 0
+  max="$last"
+  # Times carry nanoseconds of varying length, so they are compared as numbers.
+  while read -r ns proto ts; do
+    [ "$ns" -gt "$last" ] || continue
+    log "tunnel up: $proto (connected at $ts)"
+    [ "$ns" -gt "$max" ] && max="$ns"
+  done < <(grep -aoE '"LastUsedTimestamp":"[^"]+"[^{}]{0,600}"TunnelProtocol":"[A-Z0-9-]+"' "$DB" 2>/dev/null \
+             | sed -E 's/"LastUsedTimestamp":"([^"]+)".*"TunnelProtocol":"([^"]+)"/\1 \2/' | sort -u \
+             | while read -r ts proto; do
+                 printf '%s %s %s\n' "$(date -d "$ts" +%s%N 2>/dev/null || echo 0)" "$proto" "$ts"
+               done | sort -n)
+  printf '%s\n' "$max" > "$SEEN"
 }
 
 fails=0; tunnel=""

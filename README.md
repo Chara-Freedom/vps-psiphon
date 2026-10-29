@@ -455,14 +455,16 @@ Every tunnel that comes up is logged with its protocol — after a rotation, aft
 replacement inside the container, after any restart:
 
 ```
-tunnel up: QUIC-OSSH (announced at 2026-10-29T19:24:13.851Z)
+tunnel up: QUIC-OSSH (connected at 2026-10-29T19:24:13.851531498Z)
 ```
 
-The client announces a tunnel's protocol only in a diagnostic notice, so the launcher
-turns those notices on, and the watchdog reads them from the service's journal, which
-outlives the container. The time in brackets is the client's own, in UTC. Without
-this line the protocol of past tunnels survives only in Psiphon's own store of dial
-parameters, which keeps one record per server and drops it within about a day.
+The watchdog reads it from the client's own store of dial parameters
+(`psiphon.boltdb`), which holds, per server, the time a tunnel to it connected and its
+protocol; the time in brackets is that record's, in UTC. The store keeps one record per
+server and drops it within about a day, so this line is what keeps the protocols of past
+tunnels. The client's notices name a tunnel's protocol only when diagnostic notices are
+on, and those stay off — see what the launcher does under
+[Bad tunnels: what they turned out to be](#bad-tunnels-what-they-turned-out-to-be).
 
 Google's captcha wall (`302 → /sorry/index`) is not probed at all. It never justified
 a rotation — a human solves a captcha in seconds — and the probe that watched for it,
@@ -859,10 +861,13 @@ launcher therefore writes, at every start:
 - `"DisableTactics": true` — no tactics are requested or applied;
 - `"LimitTunnelProtocols"` — the protocols Psiphon itself offered these exits, minus
   the three in-proxy ones;
-- `"EmitDiagnosticNotices": true` — the only notice that names a tunnel's protocol is a
-  diagnostic one; the watchdog copies it into its journal as `tunnel up: …`.
-  Diagnostic notices hold session details: the service's own journal
-  (`journalctl -u vps-psiphon`) is not for posting in public.
+- `"EmitDiagnosticNotices": false` — kept off on purpose. Diagnostic notices are the
+  only ones that name a tunnel's protocol, but on a busy exit they ran to about 25 MB a
+  day — 140 lines a minute under some 700 connections, nearly all of them `port forward
+  failures`, one per user connection that failed through the tunnel, which the client
+  has no switch to silence alone. That is hundreds of times what the watchdog itself
+  writes. The watchdog takes the protocol from the client's store instead (`tunnel up`
+  under [The watchdog](#the-watchdog)).
 
 `InproxyTunnelProtocolSelectionProbability`, which the tactics also set, is not read by
 the client at all, and `InproxyAllowClient` is a server-side parameter; neither switches
