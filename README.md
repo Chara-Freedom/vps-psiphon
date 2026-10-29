@@ -860,14 +860,15 @@ launcher therefore writes, at every start:
 
 - `"DisableTactics": true` — no tactics are requested or applied;
 - `"LimitTunnelProtocols"` — the protocols Psiphon itself offered these exits, minus
-  the three in-proxy ones;
-- `"EmitDiagnosticNotices": false` — kept off on purpose. Diagnostic notices are the
-  only ones that name a tunnel's protocol, but on a busy exit they ran to about 25 MB a
-  day — 140 lines a minute under some 700 connections, nearly all of them `port forward
-  failures`, one per user connection that failed through the tunnel, which the client
-  has no switch to silence alone. That is hundreds of times what the watchdog itself
-  writes. The watchdog takes the protocol from the client's store instead (`tunnel up`
-  under [The watchdog](#the-watchdog)).
+  the three in-proxy ones.
+
+Diagnostic notices are left at Psiphon's default, off. They are the only notices that
+name a tunnel's protocol, but on a busy exit they ran to about 25 MB a day — 140 lines a
+minute under some 700 connections, nearly all of them `port forward failures`, one per
+user connection that failed through the tunnel, which the client has no switch to
+silence alone. That is hundreds of times what the watchdog itself writes, so the
+watchdog takes the protocol from the client's store instead (`tunnel up` under
+[The watchdog](#the-watchdog)).
 
 `InproxyTunnelProtocolSelectionProbability`, which the tactics also set, is not read by
 the client at all, and `InproxyAllowClient` is a server-side parameter; neither switches

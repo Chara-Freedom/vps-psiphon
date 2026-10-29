@@ -492,11 +492,10 @@ if [ -f "$cfg" ]; then
   # off. The protocol limit then stands: what Psiphon itself offered, minus in-proxy.
   setline DisableTactics true
   setline LimitTunnelProtocols '["SSH", "OSSH", "QUIC-OSSH", "TLS-OSSH", "SHADOWSOCKS-OSSH", "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH", "UNFRONTED-MEEK-SESSION-TICKET-OSSH", "FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH"]'
-  # Diagnostic notices stay off. They are the only notices that name a tunnel's protocol,
-  # but on a busy exit they ran to some 25 MB a day, nearly all of it one line per failed
-  # user connection, which the client cannot silence alone. The watchdog reads the
-  # protocol from the client's own store instead.
-  setline EmitDiagnosticNotices false
+  # Diagnostic notices are left at Psiphon's default, off. They are the only notices that
+  # name a tunnel's protocol, but on a busy exit they ran to some 25 MB a day, nearly all
+  # of it one line per failed user connection; the watchdog reads the protocol from the
+  # client's own store instead.
 fi
 
 # The BIND prefix is load-bearing: psiphon listens on 0.0.0.0 inside the container,
