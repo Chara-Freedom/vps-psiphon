@@ -88,7 +88,7 @@ Requires root, docker and curl.
 | `--http` | — | publish it after all — undoes a stored `--no-http` |
 | `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked first, in every mode. Empty disables it |
 | `--bulk-test-mb N` | 4 | size of the watchdog's throughput download, MB — about 35 GB a month at 4. `0` judges the YouTube page instead, at no extra traffic, for a host whose traffic is metered or scarce. Remembered across reinstalls |
-| `--tunnel-pool N` | 1 | tunnels this instance keeps at once, 1-32 (Psiphon's `TunnelPoolSize`) — see A pool of tunnels in one instance. Remembered across reinstalls |
+| `--tunnel-pool N` | 1 | legacy: tunnels this instance keeps at once, 1-32 (Psiphon's `TunnelPoolSize`) — see A pool of tunnels in one instance. Remembered across reinstalls |
 | `--bind ADDR` | docker0 gateway | host address the ports are published on |
 | `--bind-loopback` | — | publish on `127.0.0.1` instead of the gateway |
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
@@ -241,6 +241,15 @@ falls through to the general rule.
 
 ### A pool of tunnels in one instance
 
+**Legacy.** The pool was built against bad tunnels, and the bad tunnels turned out to be
+Psiphon's in-proxy ones, which a pool does not avoid — see
+[Bad tunnels: what they turned out to be](#bad-tunnels-what-they-turned-out-to-be). To
+split a heavy load, separate instances (previous section) are the better tool and the
+one this project runs on its own exits: each user keeps one exit address, and each
+watchdog judges the one tunnel its traffic uses. The pool stays because it is an option
+of Psiphon's own core, and a single instance under a very large load is a case it may
+still serve.
+
 `--tunnel-pool N` (1-32, default 1) sets Psiphon's own `TunnelPoolSize`: the instance
 keeps up to N tunnels open at once, each to a server of its own, and spreads new
 connections over them. A single connection is no faster — each one runs inside one
@@ -288,7 +297,7 @@ A second instance answers to `vps-psiphon-2`, with the same commands.
 | File | Role |
 |---|---|
 | `/etc/default/vps-psiphon` | parameters |
-| `/usr/local/sbin/vps-psiphon-run` | container launcher (`ExecStart`) |
+| `/usr/local/sbin/vps-psiphon-run` | container launcher (`ExecStart`); writes the window, the pool size, tactics off and the protocol list into Psiphon's config at every start |
 | `/usr/local/sbin/vps-psiphon-watchdog` | liveness + unusable-exit detector |
 | `/usr/local/sbin/vps-psiphon-gemini-check` | asks Gemini itself whether it serves the exit |
 | `/usr/local/sbin/vps-psiphon` | CLI |
@@ -297,6 +306,7 @@ A second instance answers to `vps-psiphon-2`, with the same commands.
 | `/opt/vps-psiphon/config` | Psiphon config (container volume) |
 | `/var/log/vps-psiphon-watchdog.log` | watchdog journal |
 | `/var/lib/vps-psiphon-watchdog.state` | watchdog counters |
+| `/var/lib/vps-psiphon-watchdog.seen` | the last tunnel the watchdog logged |
 
 For instance N > 1, every name above carries `-N`: `/etc/default/vps-psiphon-2`,
 `vps-psiphon-2.service`, `/opt/vps-psiphon-2/config` and so on.
@@ -402,10 +412,10 @@ Six rotation triggers, in order of how certain they are:
    serve, and kept 226 that were rotated anyway one check longer — ten minutes each,
    45 hours in all.
 
-   Slow-tunnel rotations that pile up in the evening in every country of the pool,
-   while the same pool is fine on another host, point at the host rather than at
-   Psiphon: the tunnel shares the host's port with everything the host carries, and no
-   rotation gets past it — see [The host's port under load](#the-hosts-port-under-load).
+   Slow and dead tunnels that pile up in every country of the pool at once, one rotation
+   after another, came on these exits from Psiphon's in-proxy tunnels, which its
+   servers had started to put first; the launcher now turns that off — see
+   [Bad tunnels: what they turned out to be](#bad-tunnels-what-they-turned-out-to-be).
 6. **Gemini refuses** — asked directly, at every check, like everything above. Gemini
    keeps a geo-check of its own that `GL` does not track, so an exit can pass
    everything above and still be refused — see
@@ -440,6 +450,19 @@ same second, usually as a slow reading with `gemini: inconclusive (no reply)`, a
 that failure is counted against the next tunnel. On one node it did not happen once in
 48 hours; on a bad evening it happened twice across four nodes, and neither time was a
 serving tunnel rotated, so it is left as it is.
+
+Every tunnel that comes up is logged with its protocol — after a rotation, after such a
+replacement inside the container, after any restart:
+
+```
+tunnel up: QUIC-OSSH (announced at 2026-10-29T19:24:13.851Z)
+```
+
+The client announces a tunnel's protocol only in a diagnostic notice, so the launcher
+turns those notices on, and the watchdog reads them from the service's journal, which
+outlives the container. The time in brackets is the client's own, in UTC. Without
+this line the protocol of past tunnels survives only in Psiphon's own store of dial
+parameters, which keeps one record per server and drops it within about a day.
 
 Google's captcha wall (`302 → /sorry/index`) is not probed at all. It never justified
 a rotation — a human solves a captcha in seconds — and the probe that watched for it,
@@ -683,7 +706,7 @@ is run as a command.
 |---|---|
 | `MIN_THROUGHPUT_KBPS=800` | throughput floor in KB/s: the rate of the watchdog's download after its first byte, or of the YouTube page at `BULK_TEST_MB=0`. One value for every node; change it only for a node that genuinely cannot reach it. `0` disables the check |
 | `BULK_TEST_MB=4` | size of that download, MB; about 35 GB a month at 4. `0` judges the page instead, at no extra traffic |
-| `TUNNEL_POOL_SIZE=1` | tunnels kept open at once, 1-32; applies from the next restart (`systemctl restart vps-psiphon`) |
+| `TUNNEL_POOL_SIZE=1` | legacy: tunnels kept open at once, 1-32; applies from the next restart (`systemctl restart vps-psiphon`) |
 | `REGION_POOL='DE NL FR'` | countries each rotation advances through; empty pins rotations to `EGRESS_REGION` |
 | `DENY_REGIONS='RU BY IR SY CU KP CN VE'` | countries the exit must never be in. Checked first, in every mode; empty disables it |
 ## Measurements
@@ -759,54 +782,91 @@ outright. It changes nothing for Gemini, whose answers are small. The YouTube pa
 1.3–1.7x: it is smaller than the window, which is also why the watchdog now judges a
 larger download instead — see the slow-tunnel check.
 
-### The host's port under load
+### Bad tunnels: what they turned out to be
 
-The tunnel leaves the host through the host's own network port, the same one that
-carries everything else on the host. On a proxy exit that is a great deal: every byte
-the exit relays crosses the port twice, in and out. When the port has no headroom
-left, every tunnel on the host slows down with it, in every country at once, and the
-watchdog reads that as slow tunnels.
+Most of what the watchdog has had to rotate on busy exits — tunnels that report
+themselves connected and carry nothing, and tunnels that crawl at a few hundred KB/s —
+turned out to have one cause: Psiphon's in-proxy tunnels, which Psiphon's own servers
+had started to put first. The way there took several wrong turns. They are kept here,
+because each looked right at the time and the measurements behind them still stand.
 
-Four instances, October 2026, on the exit hosts of one proxy chain: the same version of
-the watchdog, the same country pool, the same 800 KB/s floor. Two hosts with a shared
-port, "up to 1 Gbit/s" with 100 Mbit/s guaranteed, one instance each; one host with a
-dedicated 10 Gbit/s port and two instances. Weekly figures over four weeks (evening is
-17:00–01:00 Moscow time, the peak):
+1. **The window per connection** (August–September 2026). One connection was capped
+   at about 20 Mbit/s by Psiphon's 128 KB channel window; the launcher sets 1 MB — see
+   [The window per connection](#the-window-per-connection). Real and fixed, but it
+   limits a connection, not a tunnel.
+2. **The page test** (September). The watchdog judged the YouTube page, which reads a
+   queue as slowness; it judges a 4 MB download now — see the slow-tunnel check.
+3. **The number of tunnels** (October). Rotations piled up on two exit hosts, dozens a
+   day. A pool of three tunnels in one instance (`--tunnel-pool`) ran for a week against
+   a single tunnel on a twin host: rotations for a dead SOCKS fell from 11 to under 3 a
+   day, while the share of slow checks did not move beyond noise. It treated the
+   symptom — a dead member was carried by the other two — and is legacy now.
+4. **The host's port** (October). Published here as the cause, and wrong. The two hosts
+   shared an "up to 1 Gbit/s" port that ran at its guaranteed 100 Mbit/s on average,
+   and when their users moved to another host, slow checks on one of them fell from 24%
+   to 0% within a day. The conclusion rested on load slowing the tunnels down, and it
+   barely does: on that host, tunnels that lived an hour or more — direct ones, almost
+   all — had 3–8% of their checks below the floor under that load, against 0.3%
+   without it. The quiet day after the move ran on one direct tunnel that came up
+   before the users left; with no rotation, nothing new was drawn.
 
-| Host port | Watchdog downloads below the floor | In the evening | Median download | Rotations a day |
-|---|---|---|---|---|
-| Shared, 100 Mbit/s guaranteed | 5–24% | 8–36% | 1.8–6.6 MB/s | 7–62 |
-| Dedicated, 10 Gbit/s | 0–4% | 0–10% | 14–25 MB/s | 0–9 |
+**What it was.** Psiphon's servers send each client *tactics*: parameters for the
+client's network — timeouts, protocols and the like — that let Psiphon adapt to
+blocking which changes by the week. The client applies them on top of its own config.
+In October the tactics these exits received put in-proxy first: `InitialLimitTunnelProtocols`
+set to `INPROXY-WEBRTC-SSH`, `INPROXY-WEBRTC-OSSH` and `INPROXY-WEBRTC-QUIC-OSSH` for the
+first 10 candidates (`InitialLimitTunnelProtocolsCandidateCount`) of every tunnel
+establishment — the container's start, and every reconnect inside it. The dead tunnels
+began to pile up in the first week of October; the parameters themselves were read from
+the clients' stores at the end of the month.
 
-The shared hosts got worse week by week: one went from 5% below the floor to 24%.
+An in-proxy tunnel does not go to a Psiphon server directly. A broker, reached through
+a CDN, pairs the client with a volunteer's proxy — Psiphon Conduit, running on someone's
+phone or home computer — and the tunnel runs over WebRTC, on UDP, to that device and
+from there to the server. That is what lets a user behind a censor reach Psiphon at
+all, and for such a user it is a sound design. An exit is the opposite case: its network
+is open, and its one tunnel carries a whole host's traffic, which a volunteer's uplink
+cannot.
 
-Then the users of both shared hosts moved to another host, and the hosts stayed as they
-were — same port, same path, same Psiphon, the watchdog still checking every five
-minutes. Within a day the share below the floor fell from 24% to 0% on one (312 checks,
-evenings included) and from 27% to 9% on the other; rotations went from 77 and 38 a day
-to 0 and 2. The host the users moved to has a dedicated 10 Gbit/s port as well, and its
-two instances ran at the level of the other dedicated host from the first day: 2.5% and
-0.6% below the floor.
+Under that load in-proxy tunnels either died within about five minutes — the client
+still reporting a connected tunnel while SOCKS answered nothing — or crawled at 100–400
+KB/s. Direct tunnels (`SSH`, `OSSH`, `QUIC-OSSH`, `TLS-OSSH`) carried megabytes a
+second for hours. A rotation is a restart, and a restart is a new establishment, so
+each rotation drew in-proxy again: a storm went on until a direct tunnel came up by
+chance. On one exit host, over the one day for which every tunnel's protocol is known,
+checks on in-proxy tunnels fell below the floor 78% of the time (median 312 KB/s) and on
+direct ones 12.5% (median 3074 KB/s); from the week in-proxy took hold, 75–90% of that
+host's checks below the floor came from tunnels that lived under an hour. A host with a
+dedicated 10 Gbit/s port went through the same storm one evening, 15 of its 16 tunnels
+in-proxy — no port would have helped. UDP as such is not the problem: `QUIC-OSSH`
+tunnels held for more than a day.
 
-It was not the processor. The shared hosts had 8 vCPU of a current 16-core desktop
-processor, about 5% busy on average across ten loaded days; the busiest core, the one
-serving the network card's single receive queue, averaged 13%. It was the port: across
-the same ten days it averaged about 98 Mbit/s each way — its guaranteed rate exactly —
-so the evening peak ran above the guarantee, on bandwidth shared with the neighbours.
+The protocol of a past tunnel was read from Psiphon's store of dial parameters
+(`psiphon.boltdb`: a `LastUsedTimestamp` and a `TunnelProtocol` per server, a day or so
+deep) and, live, from the sockets: an in-proxy tunnel has no TCP connection to a Psiphon
+server at all, only UDP, plus a few kilobytes to the CDN. The watchdog now logs the
+protocol of every tunnel that comes up, so the next such change shows in the journal on
+the first day.
 
-What follows:
+**What the launcher does.** In tunnel-core the client's config is applied first and the
+tactics on top, so a protocol limit in `psiphon.config` alone is overridden. The
+launcher therefore writes, at every start:
 
-- Next to heavy proxy traffic, size the host's port for the peak and count the
-  guaranteed rate, not the "up to" one. An exit carries its traffic twice.
-- The symptom is slow-tunnel rotations piling up in the evening across every country of
-  the pool. Rotating cannot cure it, since the next tunnel crosses the same port; it only
-  churns exits, and a good exit is hard to get back. A lower `MIN_THROUGHPUT_KBPS` hides
-  the problem from the watchdog, not from the users.
-- A quick check: the bytes in `ip -s link` divided by the uptime, against the guaranteed
-  rate. An average near the guarantee means the peak is above it.
-- The shared hosts had a lower ceiling with no load at all: in the day after their users
-  left, their median download was ~3.6 MB/s against 14–25 MB/s on the dedicated ones —
-  from the port or from the site's path, the data cannot tell.
+- `"DisableTactics": true` — no tactics are requested or applied;
+- `"LimitTunnelProtocols"` — the protocols Psiphon itself offered these exits, minus
+  the three in-proxy ones;
+- `"EmitDiagnosticNotices": true` — the only notice that names a tunnel's protocol is a
+  diagnostic one; the watchdog copies it into its journal as `tunnel up: …`.
+  Diagnostic notices hold session details: the service's own journal
+  (`journalctl -u vps-psiphon`) is not for posting in public.
+
+`InproxyTunnelProtocolSelectionProbability`, which the tactics also set, is not read by
+the client at all, and `InproxyAllowClient` is a server-side parameter; neither switches
+in-proxy off. Turning tactics off gives up everything else they tune as well — they
+exist for censored networks, and an exit does not sit on one.
+
+Psiphon's tactics and its in-proxy network serve the people they were built for, and
+serve them well. An exit server carrying a host's traffic is simply not that case.
 
 ## Pitfalls
 
