@@ -20,6 +20,7 @@
 #   /opt/vps-psiphon/config                     psiphon's own config and server list
 #   /var/log/vps-psiphon-watchdog.log           watchdog journal
 #   /var/lib/vps-psiphon-watchdog.state         watchdog counters
+#   /var/lib/vps-psiphon-watchdog.seen          the last tunnel the watchdog logged
 #
 # `vps-psiphon uninstall` removes all of those, the container, the image and itself.
 set -euo pipefail
@@ -77,10 +78,11 @@ psiphon_install.sh [options]
                        of the YouTube page instead, at no extra traffic — for a
                        host with metered or scarce traffic. Remembered across
                        reinstalls.
-  --tunnel-pool N      tunnels this instance keeps open at once, 1-32, default 1
-                       (Psiphon's TunnelPoolSize). New connections spread over
-                       them, so one user may leave from several addresses at once.
-                       Remembered across reinstalls.
+  --tunnel-pool N      legacy: tunnels this instance keeps open at once, 1-32,
+                       default 1 (Psiphon's TunnelPoolSize). New connections spread
+                       over them, so one user may leave from several addresses at
+                       once. To split a heavy load, prefer --instance. Remembered
+                       across reinstalls.
   --bind ADDR         host address to publish the SOCKS5 on. Default: the
                        docker0 gateway (usually 172.17.0.1), where the kernel
                        DNATs the traffic. On loopback it cannot, and docker-proxy
@@ -411,11 +413,12 @@ MIN_THROUGHPUT_KBPS=${OLD_MIN_THROUGHPUT:-800}
 # about five seconds. About 35 GB a month at 4 MB every 5 minutes; 0 judges the YouTube
 # page instead, at no extra traffic — for a host whose traffic is metered or scarce.
 BULK_TEST_MB=$BULK_TEST_MB
-# Tunnels the client keeps open at once (Psiphon's TunnelPoolSize), 1-32. New connections
-# spread over them: a busy node no longer queues behind one server, and a tunnel that dies
-# takes only its share. The price: one user leaves from several addresses at once, and
-# each check of the watchdog sees whichever tunnel takes its connections. 1 = Psiphon's
-# own default, one tunnel.
+# Legacy. Tunnels the client keeps open at once (Psiphon's TunnelPoolSize), 1-32. New
+# connections spread over them: a busy node no longer queues behind one server, and a
+# tunnel that dies takes only its share. The price: one user leaves from several
+# addresses at once, and each check of the watchdog sees whichever tunnel takes its
+# connections. Separate instances split a heavy load better. 1 = Psiphon's own default,
+# one tunnel.
 TUNNEL_POOL_SIZE=$TUNNEL_POOL
 EOF
 chmod 600 "$ENVF"
@@ -467,11 +470,31 @@ setkey() {
     sed -i "0,/{/s/{/{\n \"$1\": $2,/" "$cfg"
   fi
 }
+# A top-level key this launcher owns, kept on one line: its earlier line is dropped and
+# the current value inserted after the opening brace.
+setline() {
+  sed -i "/^ *\"$1\": .*,\$/d" "$cfg"
+  sed -i "0,/{/s/{/{\n \"$1\": $2,/" "$cfg"
+}
 if [ -f "$cfg" ]; then
   setkey SSHChannelWindowSize "$WINDOW"
   # How many tunnels the client keeps at once; written every start, so a changed
   # TUNNEL_POOL_SIZE applies from the next restart without clearing the server list.
   setkey TunnelPoolSize "${TUNNEL_POOL_SIZE:-1}"
+  # Psiphon's servers send every client tactics: settings for the client's network,
+  # applied on top of this file. They put in-proxy first: the first ten dials of every
+  # tunnel go through a volunteer's device over WebRTC, which is built for users whose
+  # networks block Psiphon's servers. An exit carries a whole host's traffic, and through
+  # a volunteer's link such a tunnel died within minutes or crawled at a few hundred
+  # KB/s, while a direct one carried megabytes a second for hours; each rotation drew
+  # in-proxy again. Tactics override this file, so the switch that holds is to turn them
+  # off. The protocol limit then stands: what Psiphon itself offered, minus in-proxy.
+  setline DisableTactics true
+  setline LimitTunnelProtocols '["SSH", "OSSH", "QUIC-OSSH", "TLS-OSSH", "SHADOWSOCKS-OSSH", "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH", "UNFRONTED-MEEK-SESSION-TICKET-OSSH", "FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH"]'
+  # The protocol of each tunnel that comes up is announced only in a diagnostic notice;
+  # the watchdog copies it to its log. Diagnostic notices hold session details, so the
+  # service's journal is not for posting anywhere public.
+  setline EmitDiagnosticNotices true
 fi
 
 # The BIND prefix is load-bearing: psiphon listens on 0.0.0.0 inside the container,
@@ -668,8 +691,30 @@ S=(--socks5-hostname "${BIND:-127.0.0.1}:${SOCKS_PORT}")
 touch "$LOG" 2>/dev/null
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
+# Every tunnel the client brings up, with its protocol: after a rotation, after the
+# client's own reconnect inside a running container, after any restart. The client
+# announces each one in a diagnostic notice, ActiveTunnel; the service's journal keeps
+# them across container restarts. Each is logged once, with the client's own timestamp.
+SEEN=/var/lib/@P@-watchdog.seen
+log_tunnels() {
+  local last="" since="-15min" line ts proto
+  [ -r "$SEEN" ] && last="$(cat "$SEEN" 2>/dev/null)"
+  [ -n "$last" ] && since="$(date -d "$last" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo -15min)"
+  while read -r line; do
+    ts="$(grep -oE '"timestamp":"[^"]+"' <<<"$line" | cut -d'"' -f4)"
+    proto="$(grep -oE '"protocol":"[^"]+"' <<<"$line" | cut -d'"' -f4)"
+    [ -n "$ts" ] || continue
+    [[ -n "$last" && ! "$ts" > "$last" ]] && continue
+    log "tunnel up: ${proto:-?} (announced at $ts)"
+    last="$ts"
+  done < <(journalctl -u @P@.service -o cat --no-pager --since "$since" 2>/dev/null \
+             | grep '"noticeType":"ActiveTunnel"')
+  [ -n "$last" ] && printf '%s\n' "$last" > "$SEEN"
+}
+
 fails=0; tunnel=""
 [ -r "$STATE" ] && . "$STATE"
+log_tunnels
 
 # The tunnel this check is about. A restart during the check — the installer, `rotate`,
 # `region` — leaves readings that belong to neither tunnel, and a decisive failure among
@@ -794,6 +839,7 @@ if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] || [ "$decisive" = 1 ]; then
   sleep 45
   new="$(curl -s --max-time 20 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
   log "rotated: $old -> $new"
+  log_tunnels
 fi
 
 # Recorded against the tunnel this check judged: after a rotation it is the old one, so
@@ -910,7 +956,7 @@ case "${1:-status}" in
     rm -f /usr/local/sbin/@P@-run /usr/local/sbin/@P@-watchdog \
           /usr/local/sbin/@P@-prestart \
           /usr/local/sbin/@P@-advance-region /usr/local/sbin/@P@-gemini-check \
-          /etc/default/@P@ /var/lib/@P@-watchdog.state \
+          /etc/default/@P@ /var/lib/@P@-watchdog.state /var/lib/@P@-watchdog.seen \
           /var/log/@P@-watchdog.log /tmp/@P@.speed
     rm -rf /opt/@P@
     # Safe while running: bash holds the inode open.
@@ -924,7 +970,7 @@ case "${1:-status}" in
              /etc/systemd/system/@P@.service \
              /etc/systemd/system/@P@-watchdog.service \
              /etc/systemd/system/@P@-watchdog.timer \
-             /var/lib/@P@-watchdog.state \
+             /var/lib/@P@-watchdog.state /var/lib/@P@-watchdog.seen \
              /var/log/@P@-watchdog.log /opt/@P@ ; do
       [ -e "$p" ] && left="$left $p"
     done
