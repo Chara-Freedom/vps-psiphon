@@ -401,6 +401,11 @@ Six rotation triggers, in order of how certain they are:
    slow first reading the excuse changed nothing for 28, spared 22 that went on to
    serve, and kept 226 that were rotated anyway one check longer — ten minutes each,
    45 hours in all.
+
+   Slow-tunnel rotations that pile up in the evening in every country of the pool,
+   while the same pool is fine on another host, point at the host rather than at
+   Psiphon: the tunnel shares the host's port with everything the host carries, and no
+   rotation gets past it — see [The host's port under load](#the-hosts-port-under-load).
 6. **Gemini refuses** — asked directly, at every check, like everything above. Gemini
    keeps a geo-check of its own that `GL` does not track, so an exit can pass
    everything above and still be refused — see
@@ -753,6 +758,55 @@ picks, so it lands right at the default window's ceiling — ~20 Mbit/s at 30 ms
 outright. It changes nothing for Gemini, whose answers are small. The YouTube page the watchdog fetches rose only
 1.3–1.7x: it is smaller than the window, which is also why the watchdog now judges a
 larger download instead — see the slow-tunnel check.
+
+### The host's port under load
+
+The tunnel leaves the host through the host's own network port, the same one that
+carries everything else on the host. On a proxy exit that is a great deal: every byte
+the exit relays crosses the port twice, in and out. When the port has no headroom
+left, every tunnel on the host slows down with it, in every country at once, and the
+watchdog reads that as slow tunnels.
+
+Four instances, October 2026, on the exit hosts of one proxy chain: the same version of
+the watchdog, the same country pool, the same 800 KB/s floor. Two hosts with a shared
+port, "up to 1 Gbit/s" with 100 Mbit/s guaranteed, one instance each; one host with a
+dedicated 10 Gbit/s port and two instances. Weekly figures over four weeks (evening is
+17:00–01:00 Moscow time, the peak):
+
+| Host port | Watchdog downloads below the floor | In the evening | Median download | Rotations a day |
+|---|---|---|---|---|
+| Shared, 100 Mbit/s guaranteed | 5–24% | 8–36% | 1.8–6.6 MB/s | 7–62 |
+| Dedicated, 10 Gbit/s | 0–4% | 0–10% | 14–25 MB/s | 0–9 |
+
+The shared hosts got worse week by week: one went from 5% below the floor to 24%.
+
+Then the users of both shared hosts moved to another host, and the hosts stayed as they
+were — same port, same path, same Psiphon, the watchdog still checking every five
+minutes. Within a day the share below the floor fell from 24% to 0% on one (312 checks,
+evenings included) and from 27% to 9% on the other; rotations went from 77 and 38 a day
+to 0 and 2. The host the users moved to has a dedicated 10 Gbit/s port as well, and its
+two instances ran at the level of the other dedicated host from the first day: 2.5% and
+0.6% below the floor.
+
+It was not the processor. The shared hosts had 8 vCPU of a current 16-core desktop
+processor, about 5% busy on average across ten loaded days; the busiest core, the one
+serving the network card's single receive queue, averaged 13%. It was the port: across
+the same ten days it averaged about 98 Mbit/s each way — its guaranteed rate exactly —
+so the evening peak ran above the guarantee, on bandwidth shared with the neighbours.
+
+What follows:
+
+- Next to heavy proxy traffic, size the host's port for the peak and count the
+  guaranteed rate, not the "up to" one. An exit carries its traffic twice.
+- The symptom is slow-tunnel rotations piling up in the evening across every country of
+  the pool. Rotating cannot cure it, since the next tunnel crosses the same port; it only
+  churns exits, and a good exit is hard to get back. A lower `MIN_THROUGHPUT_KBPS` hides
+  the problem from the watchdog, not from the users.
+- A quick check: the bytes in `ip -s link` divided by the uptime, against the guaranteed
+  rate. An average near the guarantee means the peak is above it.
+- The shared hosts had a lower ceiling with no load at all: in the day after their users
+  left, their median download was ~3.6 MB/s against 14–25 MB/s on the dedicated ones —
+  from the port or from the site's path, the data cannot tell.
 
 ## Pitfalls
 
