@@ -485,9 +485,9 @@ if [ -f "$cfg" ]; then
   # applied on top of this file. They put in-proxy first: the first ten dials of every
   # tunnel go through a volunteer's device over WebRTC, which is built for users whose
   # networks block Psiphon's servers. An exit carries a whole host's traffic, and through
-  # a volunteer's link such a tunnel died within minutes or crawled at a few hundred
-  # KB/s, while a direct one carried megabytes a second for hours; each rotation drew
-  # in-proxy again. Tactics override this file, so the switch that holds is to turn them
+  # a volunteer's link such a tunnel almost always died within minutes or crawled at a
+  # few hundred KB/s — a lottery on the volunteer's link, with few winning tickets — while
+  # a direct one carried megabytes a second for hours; each rotation drew in-proxy again. Tactics override this file, so the switch that holds is to turn them
   # off. The protocol limit then stands: what Psiphon itself offered, minus in-proxy.
   setline DisableTactics true
   setline LimitTunnelProtocols '["SSH", "OSSH", "QUIC-OSSH", "TLS-OSSH", "SHADOWSOCKS-OSSH", "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH", "UNFRONTED-MEEK-SESSION-TICKET-OSSH", "FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH"]'
