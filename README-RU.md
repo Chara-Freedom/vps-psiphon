@@ -95,9 +95,25 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Chara-Freedom/vps-psiphon/ma
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | образ контейнера |
 | `--no-watchdog` | — | не ставить вотчдог |
 
-Доступные на момент написания регионы: `AT AU BE BR CA CH CZ DE DK ES FR GB ID IE
-IN IT JP NL NO PL RS SE SG US`. Пустое значение — самый быстрый сервер в любой
-стране.
+Пустой регион — авто: самый быстрый сервер в любой стране.
+
+Собственный перечень регионов выхода Psiphon, зашитый в его приложения для
+[Android](https://github.com/Psiphon-Inc/psiphon-android/blob/master/app/src/main/java/com/psiphon3/psiphonlibrary/RegionListPreference.java)
+и [Windows](https://github.com/Psiphon-Inc/psiphon-windows/blob/master/src/webui/main.html),
+— 49 кодов: `AE AR AT AU BE BG BR CA CH CL CO CZ DE DK EE ES FI FR GB GR HK HR HU ID
+IE IN IS IT JP KE KR LT LV MX MY NL NO NZ PL PT RO RS SE SG SK TW UA US ZA`. Выйти
+клиент может только в регионе, серверы которого у него есть, а знает он лишь часть
+сети — поэтому рабочий набор меньше и со временем меняется. В ноябре 2026 клиенты на
+нескольких хостах видели вместе 28: `AT AU BE BR CA CH CZ DE DK ES FI FR GB ID IE IN
+IT JP KR LT NL NO PL RO RS SE SG US`. Список своего клиента (у экземпляра N —
+контейнер `vps-psiphon-N`):
+
+```bash
+docker logs vps-psiphon 2>&1 | grep AvailableEgressRegions | tail -1
+```
+
+Регион не из этого списка туннеля не даст: Psiphon будет ждать и подкачивать списки
+серверов и подключится, только когда очередная подкачка принесёт сервер там.
 
 ### Если порт уже занят
 

@@ -94,9 +94,25 @@ Requires root, docker and curl.
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
 | `--no-watchdog` | — | skip the watchdog |
 
-Regions available at the time of writing: `AT AU BE BR CA CH CZ DE DK ES FR GB ID
-IE IN IT JP NL NO PL RS SE SG US`. Empty means auto — the fastest server in any
-country.
+An empty region means auto — the fastest server in any country.
+
+Psiphon's own list of egress regions, the one built into its
+[Android](https://github.com/Psiphon-Inc/psiphon-android/blob/master/app/src/main/java/com/psiphon3/psiphonlibrary/RegionListPreference.java)
+and [Windows](https://github.com/Psiphon-Inc/psiphon-windows/blob/master/src/webui/main.html)
+apps, has 49 codes: `AE AR AT AU BE BG BR CA CH CL CO CZ DE DK EE ES FI FR GB GR HK
+HR HU ID IE IN IS IT JP KE KR LT LV MX MY NL NO NZ PL PT RO RS SE SG SK TW UA US ZA`.
+A client can exit only in a region it holds servers for, and it holds only part of
+the network, so the set that works is smaller and drifts over time. In November 2026,
+clients on several hosts saw 28 between them: `AT AU BE BR CA CH CZ DE DK ES FI FR GB
+ID IE IN IT JP KR LT NL NO PL RO RS SE SG US`. Your client's own list (instance N:
+container `vps-psiphon-N`):
+
+```bash
+docker logs vps-psiphon 2>&1 | grep AvailableEgressRegions | tail -1
+```
+
+A region outside that list brings no tunnel up: Psiphon keeps waiting and fetching
+server lists, and connects only once a fetch brings in a server there.
 
 ### Ports already in use
 
