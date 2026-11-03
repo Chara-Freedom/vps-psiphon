@@ -651,7 +651,7 @@ if grep -q '"wrb.fr",null,"\[' "$d/out" 2>/dev/null; then
   where="$(grep -oE '\\"[^"\\]+\\",\\"SWML_DESCRIPTION' "$d/out" | head -1 | cut -d'"' -f2 | tr -d '\\')"
   echo "ok — Gemini replies, and places this exit in ${where:-an unnamed country}"; exit 0
 fi
-errs="$(grep -oE 'BardErrorInfo",\[[0-9]+\]' "$d/out" 2>/dev/null | grep -oE '[0-9]+' | sort -u | tr '\n' ' ')"
+errs="$(grep -oE 'BardErrorInfo",\[[0-9]+' "$d/out" 2>/dev/null | grep -oE '[0-9]+' | sort -u | tr '\n' ' ')"
 case " $errs " in
   *" 1060 "*) echo "REFUSED — Gemini declines this exit (error 1060, no reply)"; exit 1 ;;
 esac
