@@ -25,7 +25,7 @@
 # `vps-psiphon uninstall` removes all of those, the container, the image and itself.
 set -euo pipefail
 
-VERSION=1.0
+VERSION=1.0.1
 IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
 INSTANCE=1
 # Chosen after preflight: the default address exists only once docker is running.
@@ -651,7 +651,8 @@ if grep -q '"wrb.fr",null,"\[' "$d/out" 2>/dev/null; then
   where="$(grep -oE '\\"[^"\\]+\\",\\"SWML_DESCRIPTION' "$d/out" | head -1 | cut -d'"' -f2 | tr -d '\\')"
   echo "ok — Gemini replies, and places this exit in ${where:-an unnamed country}"; exit 0
 fi
-errs="$(grep -oE 'BardErrorInfo",\[[0-9]+\]' "$d/out" 2>/dev/null | grep -oE '[0-9]+' | sort -u | tr '\n' ' ')"
+# The code opens the error's array: once a bare [1060], now [1060,null,"<message>"].
+errs="$(grep -oE 'BardErrorInfo",\[[0-9]+' "$d/out" 2>/dev/null | grep -oE '[0-9]+' | sort -u | tr '\n' ' ')"
 case " $errs " in
   *" 1060 "*) echo "REFUSED — Gemini declines this exit (error 1060, no reply)"; exit 1 ;;
 esac
