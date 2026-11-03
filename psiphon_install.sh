@@ -25,7 +25,7 @@
 # `vps-psiphon uninstall` removes all of those, the container, the image and itself.
 set -euo pipefail
 
-VERSION=1.0.1
+VERSION=1.1
 IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
 INSTANCE=1
 # Chosen after preflight: the default address exists only once docker is running.
@@ -616,10 +616,10 @@ put "/usr/local/sbin/$P-gemini-check" <<'GEM'
 #!/usr/bin/env bash
 # Asks Gemini itself whether it serves this exit, and prints one line:
 #   exit 0  ok            Gemini replied; the line names the place it puts us in
-#   exit 1  REFUSED       error 1060 and no reply: Gemini declines this address
+#   exit 1  REFUSED       error 1060: Gemini declines this address
 #   exit 2  inconclusive  anything else — never grounds for a rotation
 # Logged out: the page is fetched for its session fields and cookies, then one message
-# is sent.
+# is sent and held open until Gemini answers (two minutes at most).
 #
 #   --direct  probe from this host's own address instead of through the tunnel, to
 #             tell a burned exit apart from a refusal that follows the whole host.
@@ -639,23 +639,35 @@ if [ -z "$bl" ] || [ -z "$sid" ]; then
   echo "inconclusive (page answered ${code:-nothing}, without the session fields)"; exit 2
 fi
 
-curl "${C[@]}" --max-time 60 -o "$d/out" \
-  -H 'Content-Type: application/x-www-form-urlencoded;charset=utf-8' \
-  -H 'Origin: https://gemini.google.com' -H 'Referer: https://gemini.google.com/' -H 'X-Same-Domain: 1' \
-  --data-urlencode 'f.req=[null,"[[\"hi\"],null,null]"]' \
-  "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=${bl}&f.sid=${sid}&hl=en&_reqid=$(( RANDOM * 10 + 100000 ))&rt=c" 2>/dev/null
+U='https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate'
+H=(-H 'Content-Type: application/x-www-form-urlencoded;charset=utf-8'
+   -H 'Origin: https://gemini.google.com' -H 'Referer: https://gemini.google.com/' -H 'X-Same-Domain: 1')
 
-# A reply is a frame whose payload is not null. Error codes can trail a reply — 1096
-# follows every logged-out one — so they are only read when no reply came at all.
-if grep -q '"wrb.fr",null,"\[' "$d/out" 2>/dev/null; then
-  where="$(grep -oE '\\"[^"\\]+\\",\\"SWML_DESCRIPTION' "$d/out" | head -1 | cut -d'"' -f2 | tr -d '\\')"
-  echo "ok — Gemini replies, and places this exit in ${where:-an unnamed country}"; exit 0
-fi
-# The code opens the error's array: once a bare [1060], now [1060,null,"<message>"].
+# Gemini can take a minute or more to answer, while Psiphon's servers close a connection
+# on which no byte has moved for 30 s. So a second request rides the same HTTP/2
+# connection and keeps it busy: its body trickles one byte every 2 s until the message's
+# transfer is over (its -w line goes to stderr, unbuffered, into $d/w). Google answers
+# that request 400 once its body ends, and the answer is discarded.
+i=0
+while ! grep -q message-done "$d/w" 2>/dev/null && [ "$i" -lt 60 ]; do sleep 2; printf x; i=$((i + 1)); done |
+  curl --parallel "${C[@]}" "${H[@]}" --max-time 130 -o "$d/out" -w '%{stderr}message-done' \
+    --data-urlencode 'f.req=[null,"[[\"hi\"],null,null]"]' \
+    "$U?bl=${bl}&f.sid=${sid}&hl=en&_reqid=$(( RANDOM * 10 + 100000 ))&rt=c" \
+    --next "${C[@]}" "${H[@]}" -X POST -T - --max-time 130 -o /dev/null "$U?rt=c" \
+    >/dev/null 2>"$d/w"
+
+# 1060 decides first: a held answer can open with a frame that is not a reply. Served
+# means a reply that names the place; 1096 trails every logged-out reply and says
+# nothing. The code opens the error's array: once a bare [1060], now [1060,null,"…"].
 errs="$(grep -oE 'BardErrorInfo",\[[0-9]+' "$d/out" 2>/dev/null | grep -oE '[0-9]+' | sort -u | tr '\n' ' ')"
 case " $errs " in
   *" 1060 "*) echo "REFUSED — Gemini declines this exit (error 1060, no reply)"; exit 1 ;;
 esac
+where="$(grep -oE '\\"[^"\\]+\\",\\"SWML_DESCRIPTION' "$d/out" 2>/dev/null | head -1 | cut -d'"' -f2 | tr -d '\\')"
+[ -n "$where" ] && { echo "ok — Gemini replies, and places this exit in $where"; exit 0; }
+if grep -q '"wrb.fr",null,"\[' "$d/out" 2>/dev/null; then
+  echo "inconclusive (an answer without a place${errs:+, error ${errs% }})"; exit 2
+fi
 echo "inconclusive (no reply${errs:+, error ${errs% }})"; exit 2
 GEM
 chmod 755 "/usr/local/sbin/$P-gemini-check"

@@ -631,8 +631,17 @@ mirror image.
 Chatting without an account is part of Gemini — logged-out messages are answered by a
 lighter model — so it can simply be asked: fetch the page for its session fields and
 cookies, send one message. A serving address replies and states the country Gemini
-places it in; a refused one returns error 1060 and nothing else. Every refused address
+places it in; a refused one returns error 1060 and no reply. Every refused address
 above gave 1060 and every serving one replied, which is why one refusal is enough.
+
+The answer can take a minute or more, while Psiphon's servers close a connection on
+which no byte has moved for 30 seconds (`IdleTCPPortForwardTimeoutMilliseconds`, set on
+their side). So the message is held open: a second request rides the same HTTP/2
+connection, its body trickling one byte every two seconds until the answer is in, two
+minutes at most; Google answers that request 400, and it is discarded. Without it,
+every answer slower than 30 seconds, a reply or a refusal alike, reached the check
+through the tunnel as nothing at all. A held answer can open with a frame that is not
+a reply, so 1060 is read first, and only a reply that names a place counts as served.
 
 ```
 vps-psiphon-gemini-check            # through the tunnel
