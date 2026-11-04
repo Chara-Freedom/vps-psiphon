@@ -332,8 +332,53 @@ say "vps-psiphon $VERSION  image=$IMAGE  egress=${EGRESS_REGION:-auto}  device=$
 # before anything is written, so a failure leaves the host as it was.
 CI_DIR="/opt/$P/curl-impersonate"
 CI_REPO=lexiforest/curl-impersonate
+# A known-good release, taken when the latest cannot be read, fetched, verified or run.
+# Its digests are written here, so neither a change to GitHub's release page nor a newer
+# release that is renamed or broken stops the install. Google's flag answers any
+# browser's handshake, so an older Chrome serves as well as the newest.
+CI_PIN=v2.3.2
+ci_pin_sum() {
+  case "$1" in
+    aarch64-linux-gnu)   echo 35a351db883f5ce82945bd8280c727b08e27aa48594d4eb9e091d8c80e936d52 ;;
+    aarch64-linux-musl)  echo 1519bcee11f9c93a7ed95026bd951d53e8c7cd093f3ac53651b143e5a1e2098f ;;
+    arm-linux-gnueabihf) echo a5bc29ea22c15286d8cecfed601cd222f569cd734a8d17232aece7bea0e6fe42 ;;
+    i386-linux-gnu)      echo c15fd50d8f1e3811c9a048942505ec476aad0aa432d5f2aebcd63ccb1ebcac16 ;;
+    riscv64-linux-gnu)   echo 23089329bdd51fb29d5d2ae730fbe5933b117b4f6e9734569a931b2b1813106f ;;
+    x86_64-linux-gnu)    echo bc9bd2522fe1850dd54c0fff189c8dd606df3f222ab2a905f2dd255123c3f495 ;;
+    x86_64-linux-musl)   echo ce79849f3be2e15d06364f89aeebb901b6be7b48947e2af8dae0616bbc87731f ;;
+  esac
+}
+
+# Downloads release $1's asset $2, checks it against sha256 $3 and puts it in place;
+# on failure prints why and returns 1, leaving the installed build untouched.
+ci_fetch() {
+  local tag="$1" asset="$2" sum="$3" tmp
+  tmp="$(mktemp -d)" || { echo "no temp dir"; return 1; }
+  if ! curl -fsSL --max-time 300 -o "$tmp/$asset" \
+       "https://github.com/$CI_REPO/releases/download/$tag/$asset"; then
+    rm -rf "$tmp"; echo "could not download $asset"; return 1
+  fi
+  if [ "$(sha256sum "$tmp/$asset" | cut -d' ' -f1)" != "$sum" ]; then
+    rm -rf "$tmp"; echo "$asset does not match its sha256"; return 1
+  fi
+  mkdir "$tmp/x"
+  # The Gemini check needs the binary and one curl_chromeN wrapper, the newest of which it runs.
+  if ! tar -xzf "$tmp/$asset" -C "$tmp/x" || ! "$tmp/x/curl-impersonate" --version >/dev/null 2>&1 ||
+     [ -z "$(ls "$tmp/x" | grep -E '^curl_chrome[0-9]+$' | head -1)" ]; then
+    rm -rf "$tmp"; echo "$asset holds no working curl-impersonate with a Chrome profile"; return 1
+  fi
+  printf '%s\n' "$tag" > "$tmp/x/VERSION"
+  mkdir -p "${CI_DIR%/*}"
+  rm -rf "${CI_DIR:?}.new"
+  mv "$tmp/x" "$CI_DIR.new"
+  rm -rf "${CI_DIR:?}"
+  mv "$CI_DIR.new" "$CI_DIR"
+  rm -rf "$tmp"
+  echo "$tag ($asset, sha256 ${sum:0:12}…)"
+}
+
 impersonate_install() {
-  local arch libc asset="" tag="" sum="" tmp
+  local arch libc tag="" sum="" why pin out
   case "$(uname -m)" in
     x86_64|amd64)  arch=x86_64 ;;
     aarch64|arm64) arch=aarch64 ;;
@@ -351,39 +396,26 @@ impersonate_install() {
 
   # The latest release redirects to its tag; the tag's asset list names each asset's
   # digest in the label of its copy button. Page markup, not an API contract: if GitHub
-  # changes it, the digest is not found and nothing is installed.
+  # changes it, the digest is not found and the pinned release is taken.
   tag="$(curl -fsSI --max-time 20 "https://github.com/$CI_REPO/releases/latest" 2>/dev/null \
          | tr -d '\r' | sed -n 's#^[Ll]ocation: .*/releases/tag/##p' | head -1 || true)"
   if [ -n "$tag" ]; then
-    asset="curl-impersonate-$tag.$arch-$libc.tar.gz"
     sum="$(curl -fsS --max-time 20 "https://github.com/$CI_REPO/releases/expanded_assets/$tag" \
-           2>/dev/null | grep -oE "sha256:[0-9a-f]{64}\" aria-label=\"Copy to clipboard digest for $asset\"" \
+           2>/dev/null | grep -oE "sha256:[0-9a-f]{64}\" aria-label=\"Copy to clipboard digest for curl-impersonate-$tag.$arch-$libc.tar.gz\"" \
            | head -1 | cut -c8-71 || true)"
   fi
-  if [ -z "$tag" ] || [ -z "$sum" ]; then
-    echo "could not read the latest release${tag:+ ($tag)} or its digest${asset:+ for $asset}"; return 1
+  if [ -n "$tag" ] && [ -n "$sum" ]; then
+    why="$(ci_fetch "$tag" "curl-impersonate-$tag.$arch-$libc.tar.gz" "$sum")" && { echo "$why"; return 0; }
+  else
+    why="could not read the latest release${tag:+ ($tag)} or its digest for $arch-$libc"
   fi
 
-  tmp="$(mktemp -d)" || { echo "no temp dir"; return 1; }
-  if ! curl -fsSL --max-time 300 -o "$tmp/$asset" \
-       "https://github.com/$CI_REPO/releases/download/$tag/$asset"; then
-    rm -rf "$tmp"; echo "could not download $asset"; return 1
+  pin="$(ci_pin_sum "$arch-$libc")"
+  [ -n "$pin" ] || { echo "$why; no pinned build for $arch-$libc either"; return 1; }
+  if out="$(ci_fetch "$CI_PIN" "curl-impersonate-$CI_PIN.$arch-$libc.tar.gz" "$pin")"; then
+    echo "$out — the pinned release, as the latest failed: $why"; return 0
   fi
-  if [ "$(sha256sum "$tmp/$asset" | cut -d' ' -f1)" != "$sum" ]; then
-    rm -rf "$tmp"; echo "$asset does not match its published sha256"; return 1
-  fi
-  mkdir "$tmp/x"
-  if ! tar -xzf "$tmp/$asset" -C "$tmp/x" || ! "$tmp/x/curl-impersonate" --version >/dev/null 2>&1; then
-    rm -rf "$tmp"; echo "$asset unpacked to no working curl-impersonate"; return 1
-  fi
-  printf '%s\n' "$tag" > "$tmp/x/VERSION"
-  mkdir -p "/opt/$P"
-  rm -rf "${CI_DIR:?}.new"
-  mv "$tmp/x" "$CI_DIR.new"
-  rm -rf "${CI_DIR:?}"
-  mv "$CI_DIR.new" "$CI_DIR"
-  rm -rf "$tmp"
-  echo "$tag ($asset, sha256 ${sum:0:12}…)"
+  echo "$why; the pinned $CI_PIN failed too: $out"; return 1
 }
 if [ "$IMPERSONATE" = 1 ]; then
   say "fetching curl-impersonate"

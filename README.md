@@ -709,8 +709,13 @@ The build is checked against the sha256 digest GitHub publishes for it. The rele
 its digest are read from the release page on github.com, not from the GitHub API: the
 API's anonymous limit is 60 requests an hour per address, and an exit shares its
 address with everything its users run — on one busy exit 26 of the 60 had been spent
-within the hour, by others. Without a verified build the install stops before changing
-anything; a reinstall that cannot reach GitHub keeps the build it already has.
+within the hour, by others. That page is markup rather than a contract, and a newer
+release may be renamed or broken, so when the latest cannot be read, fetched, verified
+or run, a known-good release pinned in the installer, its digests written in, is taken
+instead (`v2.3.2` at the time of writing; Google's flag answers any browser's
+handshake, so an older Chrome serves as well). If that fails too — GitHub unreachable,
+say — a first install stops before changing anything, and a reinstall keeps the build
+it already has.
 
 ### AI Studio keeps a third one
 
