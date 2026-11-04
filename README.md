@@ -89,6 +89,8 @@ Requires root, docker and curl.
 | `--deny-regions 'CC…'` | `RU BY IR SY CU KP CN VE` | countries the exit must never be in; checked first, in every mode. Empty disables it |
 | `--bulk-test-mb N` | 4 | size of the watchdog's throughput download, MB — about 35 GB a month at 4. `0` judges the YouTube page instead, at no extra traffic, for a host whose traffic is metered or scarce. Remembered across reinstalls |
 | `--tunnel-pool N` | 1 | legacy: tunnels this instance keeps at once, 1-32 (Psiphon's `TunnelPoolSize`) — see A pool of tunnels in one instance. Remembered across reinstalls |
+| `--impersonate` | off | install curl-impersonate and fetch the Gemini check's page with a browser's TLS handshake, so that a captcha Google shows browsers on the exit is seen and rotates at once — for a node whose Gemini leaves through the tunnel while `www.google.com` does not; see A captcha that cannot be solved. Remembered across reinstalls |
+| `--no-impersonate` | — | turn it off again and remove curl-impersonate |
 | `--bind ADDR` | docker0 gateway | host address the ports are published on |
 | `--bind-loopback` | — | publish on `127.0.0.1` instead of the gateway |
 | `--image REF` | `swarupsengupta2007/psiphon:latest` | container image |
@@ -320,6 +322,7 @@ A second instance answers to `vps-psiphon-2`, with the same commands.
 | `vps-psiphon.service` | container under systemd, `Restart=always` |
 | `vps-psiphon-watchdog.timer` | check every 5 minutes |
 | `/opt/vps-psiphon/config` | Psiphon config (container volume) |
+| `/opt/vps-psiphon/curl-impersonate` | with `--impersonate` only: the latest curl-impersonate release, checked against its sha256 |
 | `/var/log/vps-psiphon-watchdog.log` | watchdog journal |
 | `/var/lib/vps-psiphon-watchdog.state` | watchdog counters |
 | `/var/lib/vps-psiphon-watchdog.seen` | the last tunnel the watchdog logged |
@@ -329,7 +332,8 @@ For instance N > 1, every name above carries `-N`: `/etc/default/vps-psiphon-2`,
 
 ## The watchdog
 
-Six rotation triggers, in order of how certain they are:
+Six rotation triggers, in order of how certain they are, and a seventh with
+`--impersonate`:
 
 1. **tunnel dead** — SOCKS does not answer.
 2. **denied country** — Google places the exit in a sanctioned or Google-blocked
@@ -441,6 +445,11 @@ Six rotation triggers, in order of how certain they are:
    (`GEMINI_CHECK_SEC`, dropped from the settings by a reinstall), would have kept it
    up to two hours more. A refused exit stays refused. An answer that is neither a
    reply nor a refusal is logged as inconclusive and never rotates.
+7. **Google captcha** — only with `--impersonate`. The page the Gemini check fetches
+   anyway goes with a browser's TLS handshake, and a redirect to
+   `www.google.com/sorry` rotates at once — see
+   [A captcha that cannot be solved](#a-captcha-that-cannot-be-solved). No request is
+   added.
 
 Only a slow tunnel waits for a second failure in a row. Every other trigger is decisive:
 one failure rotates at once, because those do not pass by themselves. Across four
@@ -648,10 +657,60 @@ vps-psiphon-gemini-check            # through the tunnel
 vps-psiphon-gemini-check --direct   # from the host's own address
 ```
 
-Exit status 0 means served, 1 refused, 2 inconclusive. The watchdog asks at every
-check and rotates on a refusal; `vps-psiphon status` asks as well. What
-tells an address problem apart from your account: an account-level restriction follows
-you from exit to exit, while this one disappears the moment the exit changes.
+Exit status 0 means served, 1 refused, 2 inconclusive, and with `--impersonate` 3 a
+captcha (next section). The watchdog asks at every check and rotates on a refusal;
+`vps-psiphon status` asks as well. What tells an address problem apart from your
+account: an account-level restriction follows you from exit to exit, while this one
+disappears the moment the exit changes.
+
+### A captcha that cannot be solved
+
+Not every node sends all of Google through the tunnel. A popular setup sends only
+Gemini there and lets YouTube and `www.google.com` leave from the node's own address:
+where Google places that address in Russia, YouTube comes without ads (and without part
+of its music videos), while Gemini still needs a clean exit. That split has a failure
+of its own.
+
+Google can flag an exit for browsers alone. Gemini then answers a browser on that exit
+with a redirect to its captcha on `www.google.com/sorry`, and the captcha remembers the
+address it was issued for. Opened from that same address, it is an ordinary captcha
+that can be solved. Opened from any other address it offers nothing to solve — only
+"Please try your request again later" and a line `IP address: <opener> ≠ <flagged>` —
+and in the split setup `www.google.com` leaves from the node's address, not the
+exit's. Gemini stays closed to everyone on that exit until the exit changes. The node's
+own IPv6 address is a different address too, so a split by protocol does not help.
+
+The watchdog does not see it on its own. On one such exit, measured within a few
+minutes:
+
+| Request to `gemini.google.com` | Answer |
+|---|---|
+| plain curl through the flagged exit, with or without a browser's headers | the page |
+| a browser's TLS handshake through it (Chrome, Firefox or Safari, via curl-impersonate), with or without a browser's headers, over HTTP/2 or HTTP/1.1 | `302` to `/sorry` |
+| the same browser handshake through four other exits | the page |
+
+The handshake decides. Through the same exit `www.google.com`, search and YouTube were
+served as usual; only Gemini redirected. A browser handshake had got the page through
+that exit right after it came up, so the exit was flagged while in use.
+
+`--impersonate` installs [curl-impersonate](https://github.com/lexiforest/curl-impersonate),
+its latest release, and the Gemini check fetches its page with the newest Chrome it
+knows. A redirect to `/sorry` is exit status 3, and the watchdog rotates at once. No
+request is added: it is the page the check fetches anyway, only the handshake differs.
+The message itself is still sent by plain curl.
+
+Leave it off where all of Google goes through the tunnel, as by default. There
+`www.google.com` leaves from the same exit and the captcha can be solved — in one test
+the flagged address was even let back to Gemini without one — so rotating would throw
+away a usable exit. A captcha on the node's own address, where YouTube leaves directly,
+is not the tunnel's and is not checked.
+
+The build is checked against the sha256 digest GitHub publishes for it. The release and
+its digest are read from the release page on github.com, not from the GitHub API: the
+API's anonymous limit is 60 requests an hour per address, and an exit shares its
+address with everything its users run — on one busy exit 26 of the 60 had been spent
+within the hour, by others. Without a verified build the install stops before changing
+anything; a reinstall that cannot reach GitHub keeps the build it already has.
 
 ### AI Studio keeps a third one
 
@@ -940,8 +999,9 @@ serve them well. An exit server carrying a host's traffic is simply not that cas
 vps-psiphon uninstall
 ```
 
-Removes the units, the container, the image, the config directory, the watchdog log
-and state — and finally unlinks itself, so nothing is left to clean up by hand. It
+Removes the units, the container, the image, the config directory (with
+curl-impersonate, if it was installed), the watchdog log and state — and finally
+unlinks itself, so nothing is left to clean up by hand. It
 then checks the disk and, if anything survived, names it and exits non-zero.
 
 Each instance removes only itself: `vps-psiphon-2 uninstall` leaves the first one

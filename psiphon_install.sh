@@ -18,6 +18,7 @@
 #   /usr/local/sbin/vps-psiphon                 management CLI
 #   /etc/systemd/system/vps-psiphon.service, vps-psiphon-watchdog.{service,timer}
 #   /opt/vps-psiphon/config                     psiphon's own config and server list
+#   /opt/vps-psiphon/curl-impersonate           with --impersonate: a browser build of curl
 #   /var/log/vps-psiphon-watchdog.log           watchdog journal
 #   /var/lib/vps-psiphon-watchdog.state         watchdog counters
 #   /var/lib/vps-psiphon-watchdog.seen          the last tunnel the watchdog logged
@@ -25,7 +26,7 @@
 # `vps-psiphon uninstall` removes all of those, the container, the image and itself.
 set -euo pipefail
 
-VERSION=1.1
+VERSION=1.2
 IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
 INSTANCE=1
 # Chosen after preflight: the default address exists only once docker is running.
@@ -42,6 +43,7 @@ DENY_REGIONS_DEFAULT="RU BY IR SY CU KP CN VE"
 DENY_REGIONS=""; DENY_REGIONS_SET=0
 BULK_TEST_MB=""; BULK_TEST_SET=0
 TUNNEL_POOL=""; TUNNEL_POOL_SET=0
+IMPERSONATE=0; IMPERSONATE_SET=0
 
 # Ports asked for explicitly are honoured or refused, never silently moved.
 SOCKS_PORT_SET=0
@@ -84,6 +86,13 @@ psiphon_install.sh $VERSION [options]
                        over them, so one user may leave from several addresses at
                        once. To split a heavy load, prefer --instance. Remembered
                        across reinstalls.
+  --impersonate        install curl-impersonate and let the Gemini check fetch its
+                       page with a browser's TLS handshake. Google can flag an exit
+                       for browsers alone and send them to a captcha; a redirect
+                       to it then rotates at once. For a node whose Gemini leaves
+                       through this tunnel while www.google.com does not — there
+                       that captcha cannot be solved. Remembered across reinstalls
+  --no-impersonate     turn it off again and remove curl-impersonate
   --bind ADDR         host address to publish the SOCKS5 on. Default: the
                        docker0 gateway (usually 172.17.0.1), where the kernel
                        DNATs the traffic. On loopback it cannot, and docker-proxy
@@ -120,6 +129,8 @@ while [ $# -gt 0 ]; do
     --tunnel-pool)
       case "${2:-}" in [1-9]|[12][0-9]|3[0-2]) ;; *) echo "--tunnel-pool takes a number from 1 to 32" >&2; exit 1 ;; esac
       TUNNEL_POOL="$2"; TUNNEL_POOL_SET=1; shift 2 ;;
+    --impersonate)    IMPERSONATE=1; IMPERSONATE_SET=1; shift ;;
+    --no-impersonate) IMPERSONATE=0; IMPERSONATE_SET=1; shift ;;
     --bind)          BIND="${2:?}";          shift 2 ;;
     --bind-loopback) BIND=127.0.0.1;         shift   ;;
     --image)         IMAGE="${2:?}";         shift 2 ;;
@@ -244,6 +255,9 @@ if [ -r "$ENVF" ]; then
   if [ "$PUBLISH_HTTP_SET" = 0 ]; then
     V="$(sed -n 's/^PUBLISH_HTTP=//p' "$ENVF" | head -1)"; [ -n "$V" ] && PUBLISH_HTTP="$V"
   fi
+  if [ "$IMPERSONATE_SET" = 0 ]; then
+    V="$(sed -n 's/^IMPERSONATE=//p' "$ENVF" | head -1)"; [ -n "$V" ] && IMPERSONATE="$V"
+  fi
 fi
 
 # On a reinstall our own container holds the port — that is not a conflict.
@@ -308,6 +322,84 @@ fi
 
 if [ "$PUBLISH_HTTP" = 1 ]; then HTTP_DESC="$BIND:$HTTP_PORT"; else HTTP_DESC="not published"; fi
 say "vps-psiphon $VERSION  image=$IMAGE  egress=${EGRESS_REGION:-auto}  device=$DEVICE_REGION  socks=$BIND:$SOCKS_PORT  http=$HTTP_DESC"
+
+# --------------------------------------------------------- curl-impersonate --
+# With --impersonate the Gemini check fetches its page with a browser's TLS handshake.
+# The build is the latest release of lexiforest/curl-impersonate, checked against the
+# sha256 digest GitHub publishes for the asset. Both are read from github.com, not from
+# the API: the API's anonymous limit is 60 requests an hour per address, and an exit
+# shares its address with everything its users run, so others can spend it. Fetched
+# before anything is written, so a failure leaves the host as it was.
+CI_DIR="/opt/$P/curl-impersonate"
+CI_REPO=lexiforest/curl-impersonate
+impersonate_install() {
+  local arch libc asset="" tag="" sum="" tmp
+  case "$(uname -m)" in
+    x86_64|amd64)  arch=x86_64 ;;
+    aarch64|arm64) arch=aarch64 ;;
+    armv7l)        arch=arm ;;
+    i?86)          arch=i386 ;;
+    riscv64)       arch=riscv64 ;;
+    *) echo "no build is published for $(uname -m)"; return 1 ;;
+  esac
+  # Not a pipe into grep -q: musl's ldd exits 1, and under pipefail that hides the match.
+  case "$(ldd --version 2>&1 || true)" in
+    *musl*) libc=linux-musl ;;
+    *)      libc=linux-gnu ;;
+  esac
+  [ "$arch" = arm ] && libc=linux-gnueabihf
+
+  # The latest release redirects to its tag; the tag's asset list names each asset's
+  # digest in the label of its copy button. Page markup, not an API contract: if GitHub
+  # changes it, the digest is not found and nothing is installed.
+  tag="$(curl -fsSI --max-time 20 "https://github.com/$CI_REPO/releases/latest" 2>/dev/null \
+         | tr -d '\r' | sed -n 's#^[Ll]ocation: .*/releases/tag/##p' | head -1 || true)"
+  if [ -n "$tag" ]; then
+    asset="curl-impersonate-$tag.$arch-$libc.tar.gz"
+    sum="$(curl -fsS --max-time 20 "https://github.com/$CI_REPO/releases/expanded_assets/$tag" \
+           2>/dev/null | grep -oE "sha256:[0-9a-f]{64}\" aria-label=\"Copy to clipboard digest for $asset\"" \
+           | head -1 | cut -c8-71 || true)"
+  fi
+  if [ -z "$tag" ] || [ -z "$sum" ]; then
+    echo "could not read the latest release${tag:+ ($tag)} or its digest${asset:+ for $asset}"; return 1
+  fi
+
+  tmp="$(mktemp -d)" || { echo "no temp dir"; return 1; }
+  if ! curl -fsSL --max-time 300 -o "$tmp/$asset" \
+       "https://github.com/$CI_REPO/releases/download/$tag/$asset"; then
+    rm -rf "$tmp"; echo "could not download $asset"; return 1
+  fi
+  if [ "$(sha256sum "$tmp/$asset" | cut -d' ' -f1)" != "$sum" ]; then
+    rm -rf "$tmp"; echo "$asset does not match its published sha256"; return 1
+  fi
+  mkdir "$tmp/x"
+  if ! tar -xzf "$tmp/$asset" -C "$tmp/x" || ! "$tmp/x/curl-impersonate" --version >/dev/null 2>&1; then
+    rm -rf "$tmp"; echo "$asset unpacked to no working curl-impersonate"; return 1
+  fi
+  printf '%s\n' "$tag" > "$tmp/x/VERSION"
+  mkdir -p "/opt/$P"
+  rm -rf "${CI_DIR:?}.new"
+  mv "$tmp/x" "$CI_DIR.new"
+  rm -rf "${CI_DIR:?}"
+  mv "$CI_DIR.new" "$CI_DIR"
+  rm -rf "$tmp"
+  echo "$tag ($asset, sha256 ${sum:0:12}…)"
+}
+if [ "$IMPERSONATE" = 1 ]; then
+  say "fetching curl-impersonate"
+  if CI_MSG="$(impersonate_install)"; then
+    say "curl-impersonate $CI_MSG"
+  elif [ -x "$CI_DIR/curl-impersonate" ]; then
+    say "!! curl-impersonate: $CI_MSG — keeping the installed $(cat "$CI_DIR/VERSION" 2>/dev/null || echo build)"
+  else
+    die "curl-impersonate: $CI_MSG.
+       --impersonate needs it, so nothing was installed. Re-run later, or run
+       without --impersonate."
+  fi
+elif [ -e "$CI_DIR" ]; then
+  rm -rf "${CI_DIR:?}"
+  say "curl-impersonate removed: --impersonate is off"
+fi
 
 # ------------------------------------------------------------------ install --
 mkdir -p "$CONF_DIR"
@@ -421,6 +513,14 @@ BULK_TEST_MB=$BULK_TEST_MB
 # connections. Separate instances split a heavy load better. 1 = Psiphon's own default,
 # one tunnel.
 TUNNEL_POOL_SIZE=$TUNNEL_POOL
+# 1: the Gemini check fetches its page with curl-impersonate, installed by --impersonate
+# in /opt/$P/curl-impersonate, so the request carries a browser's TLS handshake. Google
+# can flag an exit for browsers alone: Gemini then sends them to a captcha on
+# www.google.com, and where that host does not leave through this tunnel the captcha
+# cannot be solved. A redirect to it rotates at once. 0: plain curl, which that flag
+# lets through. Set it with --impersonate or --no-impersonate, which also install or
+# remove the build.
+IMPERSONATE=$IMPERSONATE
 EOF
 chmod 600 "$ENVF"
 
@@ -618,8 +718,16 @@ put "/usr/local/sbin/$P-gemini-check" <<'GEM'
 #   exit 0  ok            Gemini replied; the line names the place it puts us in
 #   exit 1  REFUSED       error 1060: Gemini declines this address
 #   exit 2  inconclusive  anything else — never grounds for a rotation
+#   exit 3  CAPTCHA       with IMPERSONATE=1 only: Google sends a browser on this exit to
+#                         its captcha on www.google.com/sorry
 # Logged out: the page is fetched for its session fields and cookies, then one message
 # is sent and held open until Gemini answers (two minutes at most).
+#
+# With IMPERSONATE=1 the page is fetched by curl-impersonate as the newest Chrome it
+# knows. Google can flag an exit for browsers alone: on one such exit, measured within
+# a few minutes, every browser handshake (Chrome, Firefox, Safari) was redirected to the
+# captcha, with or without a browser's headers, while plain curl got the page, with or
+# without them — the handshake decides. The message itself still goes by plain curl.
 #
 #   --direct  probe from this host's own address instead of through the tunnel, to
 #             tell a burned exit apart from a refusal that follows the whole host.
@@ -632,11 +740,27 @@ d="$(mktemp -d)" || { echo "inconclusive (no temp dir)"; exit 2; }
 trap 'rm -rf "$d"' EXIT
 C=(-s "${P[@]}" -A "$UA" -H 'Accept-Language: en-US,en;q=0.9' -b "$d/jar" -c "$d/jar")
 
-code="$(curl "${C[@]}" --max-time 30 -o "$d/app" -w '%{http_code}' https://gemini.google.com/app 2>/dev/null || true)"
+# The browser build sends its own coherent headers, so it gets no -A or -H of ours.
+G=(curl "${C[@]}"); imp=0; note=""
+if [ "${IMPERSONATE:-0}" = 1 ]; then
+  ci=/opt/@P@/curl-impersonate
+  n="$(ls "$ci" 2>/dev/null | sed -n 's/^curl_chrome\([0-9][0-9]*\)$/\1/p' | sort -n | tail -1)"
+  if [ -n "$n" ] && [ -x "$ci/curl-impersonate" ]; then
+    G=("$ci/curl_chrome$n" -s "${P[@]}" -b "$d/jar" -c "$d/jar"); imp=1
+  else
+    note=" (impersonate is on, but no curl-impersonate build is installed: the page went by plain curl)"
+  fi
+fi
+
+code="$("${G[@]}" --max-time 30 -o "$d/app" -D "$d/head" -w '%{http_code}' https://gemini.google.com/app 2>/dev/null || true)"
+if [ "$imp" = 1 ] && [ "$code" = 302 ] &&
+   grep -qiE '^location: *https://[^/]*google\.[a-z.]+/sorry/' "$d/head" 2>/dev/null; then
+  echo "CAPTCHA — Google sends a browser on this exit to /sorry, Gemini not asked"; exit 3
+fi
 bl="$(grep -oE '"cfb2h":"[^"]+"' "$d/app" 2>/dev/null | head -1 | cut -d'"' -f4)"
 sid="$(grep -oE '"FdrFJe":"[^"]+"' "$d/app" 2>/dev/null | head -1 | cut -d'"' -f4)"
 if [ -z "$bl" ] || [ -z "$sid" ]; then
-  echo "inconclusive (page answered ${code:-nothing}, without the session fields)"; exit 2
+  echo "inconclusive (page answered ${code:-nothing}, without the session fields)$note"; exit 2
 fi
 
 U='https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate'
@@ -661,14 +785,14 @@ while ! grep -q message-done "$d/w" 2>/dev/null && [ "$i" -lt 60 ]; do sleep 2; 
 # nothing. The code opens the error's array: once a bare [1060], now [1060,null,"…"].
 errs="$(grep -oE 'BardErrorInfo",\[[0-9]+' "$d/out" 2>/dev/null | grep -oE '[0-9]+' | sort -u | tr '\n' ' ')"
 case " $errs " in
-  *" 1060 "*) echo "REFUSED — Gemini declines this exit (error 1060, no reply)"; exit 1 ;;
+  *" 1060 "*) echo "REFUSED — Gemini declines this exit (error 1060, no reply)$note"; exit 1 ;;
 esac
 where="$(grep -oE '\\"[^"\\]+\\",\\"SWML_DESCRIPTION' "$d/out" 2>/dev/null | head -1 | cut -d'"' -f2 | tr -d '\\')"
-[ -n "$where" ] && { echo "ok — Gemini replies, and places this exit in $where"; exit 0; }
+[ -n "$where" ] && { echo "ok — Gemini replies, and places this exit in $where$note"; exit 0; }
 if grep -q '"wrb.fr",null,"\[' "$d/out" 2>/dev/null; then
-  echo "inconclusive (an answer without a place${errs:+, error ${errs% }})"; exit 2
+  echo "inconclusive (an answer without a place${errs:+, error ${errs% }})$note"; exit 2
 fi
-echo "inconclusive (no reply${errs:+, error ${errs% }})"; exit 2
+echo "inconclusive (no reply${errs:+, error ${errs% }})$note"; exit 2
 GEM
 chmod 755 "/usr/local/sbin/$P-gemini-check"
 
@@ -694,6 +818,10 @@ put "/usr/local/sbin/$P-watchdog" <<'WD'
 #   6. Gemini refuses    — asked at every check, like everything above; Gemini keeps a
 #      geo-check of its own, and its answer about an exit can change while the tunnel
 #      lasts. Error 1060 rotates at once, without waiting for a second failure.
+#   7. Google captcha    — with IMPERSONATE=1 only: the Gemini check's page, fetched with
+#      a browser's handshake, is redirected to www.google.com/sorry. Where that host
+#      leaves from another address, the captcha cannot be solved, so it rotates at once.
+#      No request is added: it is the page the Gemini check fetches anyway.
 # With a pool (TUNNEL_POOL_SIZE > 1) every probe rides whichever tunnel takes its
 # connection: a bad tunnel is caught when a probe lands on it, SOCKS is dead only when
 # every tunnel is, and a rotation restarts the whole pool.
@@ -836,6 +964,9 @@ if [ "$alive" = 1 ] && [ "$decisive" = 0 ]; then
   if [ "$grc" = 1 ]; then
     decisive=1
     reason="gemini-refused (error 1060 — one refusal is decisive)${reason:+; also $reason}"
+  elif [ "$grc" = 3 ]; then
+    decisive=1
+    reason="google-captcha (a browser on this exit is sent to /sorry — decisive)${reason:+; also $reason}"
   fi
 fi
 
@@ -917,6 +1048,9 @@ status() {
   # Not folded into a default expansion: an apostrophe inside it opens a quote.
   [ -n "$gl_verdict" ] || gl_verdict="Google's own verdict about this exit"
   echo "country   : ${gl:-?}   ($gl_verdict)"
+  if [ "${IMPERSONATE:-0}" = 1 ]; then
+    echo "captcha   : watched — Gemini's page is fetched as a browser (curl-impersonate $(cat /opt/@P@/curl-impersonate/VERSION 2>/dev/null || echo 'MISSING'))"
+  fi
   echo -n "gemini    : "; /usr/local/sbin/@P@-gemini-check
   echo -n "traffic   : "; docker exec "$NAME" cat /proc/net/dev 2>/dev/null | awk '/eth0/{printf "rx %.2f GB / tx %.2f GB\n", $2/1e9, $10/1e9}' || echo 'n/a'
 }
