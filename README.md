@@ -560,10 +560,13 @@ vps-psiphon pool ''                            # back to a single fixed country
 Keep the pool to countries near enough not to cost you the latency. Empty (the
 default) keeps rotations in `EGRESS_REGION`.
 
-The region is applied by rewriting `psiphon.config` in place. The image seeds that
-file only when it is absent, so the edit sticks — and the client keeps its cached
-server list, which `vps-psiphon region` discards along with the whole config
-directory.
+Every rotation — the watchdog's and `vps-psiphon rotate` — starts the client on an
+empty config directory, as `vps-psiphon region` does, and the launcher seeds
+`psiphon.config` again from `/etc/default/vps-psiphon`. The client keeps the servers it
+knows in that directory, and with it kept a plain restart kept bringing it back to the
+same server in the country: rotations through a pool of four countries kept landing on
+the same four exits — in one journal, 13 rotations into one country over two days all
+came back to one server — and a pool with no good exit among them never left it.
 
 ### Why the country check is the one that matters
 

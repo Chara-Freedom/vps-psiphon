@@ -26,7 +26,7 @@
 # `vps-psiphon uninstall` removes all of those, the container, the image and itself.
 set -euo pipefail
 
-VERSION=1.2
+VERSION=1.3
 IMAGE="${IMAGE:-swarupsengupta2007/psiphon:latest}"
 INSTANCE=1
 # Chosen after preflight: the default address exists only once docker is running.
@@ -716,11 +716,12 @@ chmod 755 "/usr/local/sbin/$P-prestart"
 # ---- region pool ------------------------------------------------------------
 put "/usr/local/sbin/$P-advance-region" <<'ADV'
 #!/usr/bin/env bash
-# Advance EGRESS_REGION to the next country in REGION_POOL and apply it. Prints
-# "old -> new" when it changes anything, silent when there is no pool.
+# Advance EGRESS_REGION to the next country in REGION_POOL. Prints "old -> new" when
+# it changes anything, silent when there is no pool.
 #
-# Applied by editing psiphon.config in place — the image seeds that file only when
-# absent — which keeps the client's cached server list, unlike `vps-psiphon region`.
+# Only the env file is edited: both callers, the watchdog and `vps-psiphon rotate`,
+# start the client on an empty config directory, and the launcher seeds psiphon.config
+# from the env file.
 set -uo pipefail
 ENVF=/etc/default/@P@
 [ -r "$ENVF" ] && . "$ENVF"
@@ -737,8 +738,6 @@ done
 [ "$nxt" = "$cur" ] && exit 0
 
 sed -i "s/^EGRESS_REGION=.*/EGRESS_REGION=$nxt/" "$ENVF"
-cfg="${CONF_DIR:-/opt/@P@/config}/psiphon.config"
-[ -f "$cfg" ] && sed -i -E "s/\"EgressRegion\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"EgressRegion\": \"$nxt\"/" "$cfg"
 printf '%s -> %s\n' "${cur:-auto}" "$nxt"
 ADV
 chmod 0755 "/usr/local/sbin/$P-advance-region"
@@ -1021,7 +1020,16 @@ if [ "$fails" -ge "${FAIL_THRESHOLD:-2}" ] || [ "$decisive" = 1 ]; then
   log "rotating away from exit $old"
   moved="$(/usr/local/sbin/@P@-advance-region 2>/dev/null)"
   [ -n "$moved" ] && log "region $moved"
-  systemctl restart @P@.service
+  # The client keeps the servers it knows in its config directory, and a plain restart
+  # kept bringing it back to the same server in the country: rotations through a pool of
+  # four countries kept landing on the same four exits — in one journal, 13 rotations
+  # into one country over two days all came back to one server — and a pool with no good
+  # exit among them never left it. Emptied, the directory is seeded again by the
+  # launcher, and the client draws a server afresh.
+  systemctl stop @P@.service
+  c="${CONF_DIR:-/opt/@P@/config}"
+  rm -rf "${c:?}"/*; mkdir -p "$c"; chown -R 1000:1000 "$c"
+  systemctl start @P@.service
   sleep 45
   new="$(curl -s --max-time 20 "${S[@]}" https://api.ipify.org 2>/dev/null || echo '?')"
   log "rotated: $old -> $new"
@@ -1049,6 +1057,16 @@ PUBLISH_HTTP="${PUBLISH_HTTP:-1}"
 CONF_DIR="${CONF_DIR:-/opt/@P@/config}"
 BIND="${BIND:-127.0.0.1}"
 S=(--socks5-hostname "${BIND}:${SOCKS_PORT}")
+
+# Starts the client on an empty config directory. The client keeps the servers it knows
+# there, and a plain restart kept bringing it back to the same server in the country;
+# emptied, the directory is seeded again by the launcher from /etc/default/@P@ — the
+# new region too.
+fresh_start() {
+  systemctl stop @P@.service
+  rm -rf "${CONF_DIR:?}"/*; mkdir -p "$CONF_DIR"; chown -R 1000:1000 "$CONF_DIR"
+  systemctl start @P@.service
+}
 
 status() {
   echo "container : $(docker ps --filter "name=^${NAME}$" --format '{{.Status}}' || echo 'DOWN')"
@@ -1093,7 +1111,7 @@ case "${1:-status}" in
     echo "rotating (fresh tunnel, new exit)…"
     moved="$(/usr/local/sbin/@P@-advance-region 2>/dev/null)"
     [ -n "$moved" ] && echo "region    : $moved"
-    systemctl restart @P@.service; sleep 45
+    fresh_start; sleep 45
     # advance-region rewrote the env file; re-read it so status shows the new region.
     [ -r /etc/default/@P@ ] && . /etc/default/@P@
     status ;;
@@ -1118,8 +1136,7 @@ case "${1:-status}" in
     sed -i "s/^EGRESS_REGION=.*/EGRESS_REGION=$r/" /etc/default/@P@
     EGRESS_REGION="$r"
     # The image seeds /config only once; an existing config keeps the OLD region.
-    rm -rf "${CONF_DIR:?}"/*; mkdir -p "$CONF_DIR"; chown -R 1000:1000 "$CONF_DIR"
-    systemctl restart @P@.service; sleep 45; status ;;
+    fresh_start; sleep 45; status ;;
   speed)
     U="https://speed.cloudflare.com/__down?bytes=50000000"
     echo -n "single 50MB : "
