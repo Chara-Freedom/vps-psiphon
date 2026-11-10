@@ -1017,3 +1017,8 @@ then checks the disk and, if anything survived, names it and exits non-zero.
 
 Each instance removes only itself: `vps-psiphon-2 uninstall` leaves the first one
 running, and the image stays while any instance still uses it.
+
+## Contributing
+
+Pull requests go to the `dev` branch. `main` moves only at a release, when it is
+brought up to `dev` at the release tag.
