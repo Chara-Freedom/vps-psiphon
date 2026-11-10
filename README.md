@@ -985,10 +985,11 @@ serve them well. An exit server carrying a host's traffic is simply not that cas
   `ss -tlnp | grep 1080` should show your `BIND` address, never `0.0.0.0` or `[::]`. If you
   must leave a port published wider, filter it in the `DOCKER-USER` chain, which
   docker consults first.
-- **Changing the region requires clearing `/opt/vps-psiphon/config`.** The image
-  seeds the config on first run only; after that `EGRESS_REGION` from the
-  environment is silently ignored and you stay in the old country without being
-  told. `vps-psiphon region` and a re-install both handle this.
+- **Before 1.3 an empty region was not auto.** The image's config template carries
+  `"EgressRegion": "SG"`, and the image replaces it only with a value that is not
+  empty, so an empty `EGRESS_REGION` exited through Singapore. Since 1.3 the launcher
+  writes both regions from `/etc/default/vps-psiphon` into `psiphon.config` on every
+  start; an empty one is written as empty, which Psiphon reads as any country.
 - **`--bind-loopback` requires the xray container to use host networking.**
   Loopback exists separately inside every namespace, so from a bridged container
   `127.0.0.1` names that container, not the tunnel. The default gateway address

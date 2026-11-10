@@ -435,8 +435,7 @@ fi
 
 # ------------------------------------------------------------------ install --
 mkdir -p "$CONF_DIR"
-# The image seeds /config once and then ignores EGRESS_REGION, so a stale config
-# would silently keep the old country across a --region change.
+# A changed region also drops the client's cached servers, as `vps-psiphon region` does.
 OLD_REGION="__none__"
 [ -r "$ENVF" ] && OLD_REGION="$(sed -n 's/^EGRESS_REGION=//p' "$ENVF")"
 if [ "$OLD_REGION" != "__none__" ] && [ "$OLD_REGION" != "$EGRESS_REGION" ]; then
@@ -576,9 +575,10 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 WINDOW=32
 cfg="${CONF_DIR}/psiphon.config"
 # The image writes psiphon.config only when it is absent, from its template plus the
-# ports and regions. Seeded here the same way, so the first tunnel after an install or
-# `region` carries the window too. If the template cannot be read, the image seeds the
-# file as before and the window applies from the next start.
+# ports and regions. Seeded here from the same template, so the first tunnel after an
+# install or `region` carries the window too; the regions are written below, on every
+# start. If the template cannot be read, the image seeds the file as before and the
+# window and the regions apply from the next start.
 if [ ! -f "$cfg" ] &&
    docker run --rm --entrypoint cat "$IMAGE" /etc/psiphon/psiphon.config > "$cfg.new" 2>/dev/null &&
    [ -s "$cfg.new" ]; then
@@ -586,12 +586,6 @@ if [ ! -f "$cfg" ] &&
     -e "s/\"LocalHttpProxyPort\"[[:space:]]*:[[:space:]]*[0-9]+/\"LocalHttpProxyPort\": ${HTTP_PORT}/" \
     -e "s/\"LocalSocksProxyPort\"[[:space:]]*:[[:space:]]*[0-9]+/\"LocalSocksProxyPort\": ${SOCKS_PORT}/" \
     "$cfg.new"
-  if [ -n "${DEVICE_REGION:-}" ]; then
-    sed -i -E "s/\"DeviceRegion\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"DeviceRegion\": \"${DEVICE_REGION}\"/" "$cfg.new"
-  fi
-  if [ -n "${EGRESS_REGION:-}" ]; then
-    sed -i -E "s/\"EgressRegion\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"EgressRegion\": \"${EGRESS_REGION}\"/" "$cfg.new"
-  fi
   mv "$cfg.new" "$cfg"
 fi
 rm -f "$cfg.new"
@@ -614,6 +608,12 @@ if [ -f "$cfg" ]; then
   # How many tunnels the client keeps at once; written every start, so a changed
   # TUNNEL_POOL_SIZE applies from the next restart without clearing the server list.
   setkey TunnelPoolSize "${TUNNEL_POOL_SIZE:-1}"
+  # The regions, from the env file on every start. The image's template carries "SG"
+  # and "IN", and the image replaces them only with a value that is not empty, so an
+  # empty EGRESS_REGION — auto — exited through Singapore. Psiphon reads an empty value
+  # as any country.
+  setline EgressRegion "\"${EGRESS_REGION:-}\""
+  setline DeviceRegion "\"${DEVICE_REGION:-}\""
   # Psiphon's servers send every client tactics: settings for the client's network,
   # applied on top of this file. They put in-proxy first: the first ten dials of every
   # tunnel go through a volunteer's device over WebRTC, which is built for users whose
@@ -719,9 +719,8 @@ put "/usr/local/sbin/$P-advance-region" <<'ADV'
 # Advance EGRESS_REGION to the next country in REGION_POOL. Prints "old -> new" when
 # it changes anything, silent when there is no pool.
 #
-# Only the env file is edited: both callers, the watchdog and `vps-psiphon rotate`,
-# start the client on an empty config directory, and the launcher seeds psiphon.config
-# from the env file.
+# Only the env file is edited: the launcher writes the region from it into
+# psiphon.config on every start.
 set -uo pipefail
 ENVF=/etc/default/@P@
 [ -r "$ENVF" ] && . "$ENVF"
@@ -1135,7 +1134,7 @@ case "${1:-status}" in
     r="$2"; [ "$r" = auto ] && r=""
     sed -i "s/^EGRESS_REGION=.*/EGRESS_REGION=$r/" /etc/default/@P@
     EGRESS_REGION="$r"
-    # The image seeds /config only once; an existing config keeps the OLD region.
+    # Like a rotation, it starts the client on an empty config directory.
     fresh_start; sleep 45; status ;;
   speed)
     U="https://speed.cloudflare.com/__down?bytes=50000000"
