@@ -822,6 +822,12 @@ where="$(grep -oE '\\"[^"\\]+\\",\\"SWML_DESCRIPTION' "$d/out" 2>/dev/null | hea
 if grep -q '"wrb.fr",null,"\[' "$d/out" 2>/dev/null; then
   echo "inconclusive (an answer without a place${errs:+, error ${errs% }})$note"; exit 2
 fi
+# A message Google sends to its captcha gets a 302 page in place of an answer. Told apart
+# from silence in the journal, but never a rotation: the message goes by plain curl, and
+# a captcha for curl's handshake says nothing about what a browser gets on this exit.
+if grep -qiE 'https://[^/"]*google\.[a-z.]+/sorry/' "$d/out" 2>/dev/null; then
+  echo "inconclusive (StreamGenerate sent to /sorry)$note"; exit 2
+fi
 echo "inconclusive (no reply${errs:+, error ${errs% }})$note"; exit 2
 GEM
 chmod 755 "/usr/local/sbin/$P-gemini-check"

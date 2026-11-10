@@ -700,7 +700,9 @@ that exit right after it came up, so the exit was flagged while in use.
 its latest release, and the Gemini check fetches its page with the newest Chrome it
 knows. A redirect to `/sorry` is exit status 3, and the watchdog rotates at once. No
 request is added: it is the page the check fetches anyway, only the handshake differs.
-The message itself is still sent by plain curl.
+The message itself is still sent by plain curl, so a message Google sends to `/sorry`
+is logged as `inconclusive (StreamGenerate sent to /sorry)` and never rotates: a captcha
+for curl's handshake says nothing about what a browser gets on the exit.
 
 Leave it off where all of Google goes through the tunnel, as by default. There
 `www.google.com` leaves from the same exit and the captcha can be solved — in one test
