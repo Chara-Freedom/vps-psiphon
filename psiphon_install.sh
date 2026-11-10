@@ -812,6 +812,10 @@ while ! grep -q message-done "$d/w" 2>/dev/null && [ "$i" -lt 60 ]; do sleep 2; 
     --next "${C[@]}" "${H[@]}" -X POST -T - --max-time 130 -o /dev/null "$U?rt=c" \
     >/dev/null 2>"$d/w"
 
+if grep -qiE 'google\.[a-z.]+/sorry/|<TITLE>302 Moved</TITLE>' "$d/out" 2>/dev/null; then
+  echo "CAPTCHA — Google sends StreamGenerate on this exit to /sorry, Gemini not asked$note"; exit 3
+fi
+
 # 1060 decides first: a held answer can open with a frame that is not a reply. Served
 # means a reply that names the place; 1096 trails every logged-out reply and says
 # nothing. The code opens the error's array: once a bare [1060], now [1060,null,"…"].
